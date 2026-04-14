@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+frontend/dist/
+dist/
+
+# Environment and secrets
+.env
+backend/.env
+backend/cloud-run-env.yaml
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+ENV/
+
+# Backend runtime data (local SQLite, uploads, generated files)
+backend/blackpot.db
+backend/weavy.db
+backend/uploads/
+backend/collection/
+backend/exports/
+
+# Logs and debug
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Cursor (local logs / machine state)
+.cursor/

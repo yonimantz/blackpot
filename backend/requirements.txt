@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pillow
+httpx
+python-multipart
+numpy
+google-genai
+python-dotenv
+firebase-admin

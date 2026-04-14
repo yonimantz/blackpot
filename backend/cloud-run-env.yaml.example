@@ -1,0 +1,11 @@
+# Copy to cloud-run-env.yaml (gitignored), fill in, then deploy with:
+#   gcloud run deploy blackpot-api --source . --region us-central1 --env-vars-file=cloud-run-env.yaml
+#
+# Do not commit cloud-run-env.yaml if it contains real allowlist emails.
+
+FIREBASE_PROJECT_ID: "blackpot-c2794"
+DATA_BACKEND: "firestore"
+# Comma-separated browser origins (your Firebase Hosting URL + custom domain if any)
+CORS_ORIGINS: "https://blackpot-c2794.web.app"
+# Invited sign-in emails (comma-separated, no spaces after commas is fine)
+ALLOWLIST_EMAILS: "you@example.com"
