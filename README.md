@@ -9,7 +9,7 @@ A ComfyUI-style node-based workflow editor for image generation and manipulation
 | `frontend/` | React app (Vite, XYFlow canvas) |
 | `backend/` | FastAPI API, workflow engine, persistence (SQLite or Firestore) |
 | `assets/` | Shared branding assets (e.g. `logo.svg`) |
-| `docs/` | [Publishing plan](docs/PUBLISHING_PLAN.md) (phased timeline), [dev → publish](docs/DEV_TO_PUBLISH.md), [Gemini keys](docs/GEMINI_API_KEYS.md) |
+| `docs/` | [Publishing plan](docs/PUBLISHING_PLAN.md), [dev → publish](docs/DEV_TO_PUBLISH.md), [no GCP billing deploy](docs/PUBLISH_NO_GOOGLE_BILLING.md), [Gemini keys](docs/GEMINI_API_KEYS.md) |
 | `firebase.json` | Firebase Hosting + rules (production deploy) |
 | `run.bat` | Windows: starts backend and frontend, opens the browser |
 
@@ -126,6 +126,10 @@ Set `CORS_ORIGINS` to a comma-separated list of allowed origins (e.g. `https://y
    ```
 
    Hosting serves `frontend/dist` and rewrites `/api/**` to your Cloud Run URL (same-origin `/api` in the browser).
+
+### Without Google Cloud billing (Render + Netlify)
+
+Cloud Run is not used. Deploy the API on **[Render](https://render.com)** from `backend/Dockerfile`, the static site on **Netlify**, and set **`VITE_API_BASE`** to your Render API URL when you run `npm run build`. Full steps: **[docs/PUBLISH_NO_GOOGLE_BILLING.md](docs/PUBLISH_NO_GOOGLE_BILLING.md)**. Optional blueprint: **`render.yaml`** in the repo root.
 
 ## Usage
 

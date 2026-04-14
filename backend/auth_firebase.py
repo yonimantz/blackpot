@@ -1,5 +1,6 @@
 """Firebase Auth ID token verification and invite allowlist."""
 
+import json
 import os
 from functools import lru_cache
 from typing import Any
@@ -13,6 +14,23 @@ _allowlist_skip = os.getenv('AUTH_SKIP_ALLOWLIST', '').lower() in ('1', 'true', 
 _allowed_emails_env = os.getenv('ALLOWLIST_EMAILS', '').strip()
 
 
+def _load_service_account_credentials():
+    """File path (local / some hosts) or JSON string in env (e.g. Render, Railway)."""
+    cred_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '').strip()
+    if cred_path and os.path.isfile(cred_path):
+        return credentials.Certificate(cred_path)
+    raw_json = os.getenv('FIREBASE_SERVICE_ACCOUNT_JSON', '').strip()
+    if not raw_json:
+        return None
+    try:
+        info = json.loads(raw_json)
+    except json.JSONDecodeError as e:
+        raise RuntimeError('FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON') from e
+    if not isinstance(info, dict):
+        raise RuntimeError('FIREBASE_SERVICE_ACCOUNT_JSON must be a JSON object')
+    return credentials.Certificate(info)
+
+
 @lru_cache(maxsize=1)
 def _ensure_app():
     if not _project_id:
@@ -24,9 +42,8 @@ def _ensure_app():
     opts = {}
     sb = os.getenv('FIREBASE_STORAGE_BUCKET', '').strip()
     opts['storageBucket'] = sb if sb else f'{_project_id}.appspot.com'
-    cred_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '').strip()
-    if cred_path and os.path.isfile(cred_path):
-        cred = credentials.Certificate(cred_path)
+    cred = _load_service_account_credentials()
+    if cred:
         return firebase_admin.initialize_app(cred, opts)
     return firebase_admin.initialize_app(options=opts)
 
