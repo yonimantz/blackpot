@@ -15,6 +15,22 @@ A ComfyUI-style node-based workflow editor for image generation and manipulation
 
 The favicon and in-app icon are served from `frontend/public/` (e.g. `blackpot-icon.svg`). Use `assets/logo.svg` as an additional source asset when you need the same mark outside the web build.
 
+## GitHub
+
+This folder is a Git repo on branch **`main`**. Secrets stay out of Git (see `.gitignore`: `backend/.env`, `backend/cloud-run-env.yaml`, `*.local`, `frontend/dist/`, etc.).
+
+To push to GitHub:
+
+1. Create a **new empty** repository on GitHub (no README, no license) — pick a name such as `blackpot`.
+2. From this repo root:
+
+```bat
+git remote add origin https://github.com/YOUR_USER/YOUR_REPO.git
+git push -u origin main
+```
+
+If Git asks for a password, use a [personal access token](https://github.com/settings/tokens) (classic: enable `repo` scope) instead of your account password.
+
 ## Quick start (local, no Firebase)
 
 ### Windows (both servers)
