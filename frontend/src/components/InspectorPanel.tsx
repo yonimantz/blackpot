@@ -4,6 +4,7 @@ import {
   NODE_CATEGORIES,
   MAX_COMPOSITOR_LAYERS,
   MAX_VIGNETTE_LAYERS,
+  GPT_IMAGE_2_MAX_REFERENCE_IMAGES,
 } from '../types/nodeTypes';
 import {
   REFMAPPER_ATTRIBUTES_ORDERED,
@@ -581,6 +582,11 @@ function NodePropertyEditor({
         <NanoBanana2Editor nodeId={nodeId} data={data} updateNodeData={updateNodeData} />
       );
 
+    case 'gptImage2':
+      return (
+        <GptImage2Editor nodeId={nodeId} data={data} updateNodeData={updateNodeData} />
+      );
+
     case 'imageScfPrompt':
       return (
         <ImageScfPromptEditor nodeId={nodeId} data={data} updateNodeData={updateNodeData} />
@@ -1118,8 +1124,8 @@ function NanoBananaProEditor({
 
   return (
     <div className="prop-group">
-      <div className="inspector-empty-small" style={{ opacity: 0.6, marginBottom: 8 }}>
-        Model: gemini-3-pro-image-preview (paid)
+      <div className="inspector-empty-small" style={{ opacity: 0.75, marginBottom: 8, fontFamily: 'ui-monospace, monospace' }}>
+        gemini-3-pro-image-preview
       </div>
 
       <label className="inspector-label">
@@ -1166,9 +1172,6 @@ function NanoBananaProEditor({
           − Remove
         </button>
       </div>
-      <div className="inspector-empty-small" style={{ opacity: 0.6, marginTop: 4 }}>
-        Reference images in the prompt as "image 1", "image 2", etc.
-      </div>
 
       <label className="inspector-label">Aspect Ratio</label>
       <select
@@ -1176,14 +1179,14 @@ function NanoBananaProEditor({
         value={data.aspectRatio as string}
         onChange={(e) => update('aspectRatio', e.target.value)}
       >
-        <option value="1:1">1:1 — Square</option>
-        <option value="3:4">3:4 — Portrait</option>
-        <option value="4:3">4:3 — Landscape</option>
-        <option value="3:2">3:2 — Classic Photo</option>
-        <option value="2:3">2:3 — Tall Classic</option>
-        <option value="9:16">9:16 — Tall / Stories</option>
-        <option value="16:9">16:9 — Widescreen</option>
-        <option value="21:9">21:9 — Ultra-wide</option>
+        <option value="1:1">1:1</option>
+        <option value="3:4">3:4</option>
+        <option value="4:3">4:3</option>
+        <option value="3:2">3:2</option>
+        <option value="2:3">2:3</option>
+        <option value="9:16">9:16</option>
+        <option value="16:9">16:9</option>
+        <option value="21:9">21:9</option>
       </select>
 
       <label className="inspector-label">Resolution</label>
@@ -1192,9 +1195,9 @@ function NanoBananaProEditor({
         value={data.resolution as string}
         onChange={(e) => update('resolution', e.target.value)}
       >
-        <option value="1k">1K — Native</option>
-        <option value="2k">2K — Upscaled</option>
-        <option value="4k">4K — Upscaled</option>
+        <option value="1k">1K</option>
+        <option value="2k">2K</option>
+        <option value="4k">4K</option>
       </select>
 
       <label className="inspector-label">Output Format</label>
@@ -1262,8 +1265,8 @@ function NanoBanana2Editor({
 
   return (
     <div className="prop-group">
-      <div className="inspector-empty-small" style={{ opacity: 0.6, marginBottom: 8 }}>
-        Model: gemini-3.1-flash-image-preview (paid)
+      <div className="inspector-empty-small" style={{ opacity: 0.75, marginBottom: 8, fontFamily: 'ui-monospace, monospace' }}>
+        gemini-3.1-flash-image-preview
       </div>
 
       <label className="inspector-label">Thinking Mode</label>
@@ -1322,9 +1325,6 @@ function NanoBanana2Editor({
           − Remove
         </button>
       </div>
-      <div className="inspector-empty-small" style={{ opacity: 0.6, marginTop: 4 }}>
-        Reference images in the prompt as "image 1", "image 2", etc.
-      </div>
 
       <label className="inspector-label">Aspect Ratio</label>
       <select
@@ -1332,20 +1332,20 @@ function NanoBanana2Editor({
         value={data.aspectRatio as string}
         onChange={(e) => update('aspectRatio', e.target.value)}
       >
-        <option value="1:1">1:1 — Square</option>
-        <option value="3:4">3:4 — Portrait</option>
-        <option value="4:3">4:3 — Landscape</option>
-        <option value="3:2">3:2 — Classic Photo</option>
-        <option value="2:3">2:3 — Tall Classic</option>
-        <option value="5:4">5:4 — Landscape (Slight)</option>
-        <option value="4:5">4:5 — Portrait (Slight)</option>
-        <option value="9:16">9:16 — Tall / Stories</option>
-        <option value="16:9">16:9 — Widescreen</option>
-        <option value="21:9">21:9 — Ultra-wide</option>
-        <option value="1:2">1:2 — Double Tall</option>
-        <option value="2:1">2:1 — Double Wide</option>
-        <option value="1:8">1:8 — Extreme Vertical</option>
-        <option value="8:1">8:1 — Extreme Horizontal</option>
+        <option value="1:1">1:1</option>
+        <option value="3:4">3:4</option>
+        <option value="4:3">4:3</option>
+        <option value="3:2">3:2</option>
+        <option value="2:3">2:3</option>
+        <option value="5:4">5:4</option>
+        <option value="4:5">4:5</option>
+        <option value="9:16">9:16</option>
+        <option value="16:9">16:9</option>
+        <option value="21:9">21:9</option>
+        <option value="1:2">1:2</option>
+        <option value="2:1">2:1</option>
+        <option value="1:8">1:8</option>
+        <option value="8:1">8:1</option>
       </select>
 
       <label className="inspector-label">Resolution</label>
@@ -1354,10 +1354,10 @@ function NanoBanana2Editor({
         value={data.resolution as string}
         onChange={(e) => update('resolution', e.target.value)}
       >
-        <option value="512">512px — Fast Prototype</option>
-        <option value="1k">1K — Native</option>
-        <option value="2k">2K — Upscaled</option>
-        <option value="4k">4K — Upscaled</option>
+        <option value="512">512</option>
+        <option value="1k">1K</option>
+        <option value="2k">2K</option>
+        <option value="4k">4K</option>
       </select>
 
       <label className="inspector-label">Output Format</label>
@@ -1382,6 +1382,208 @@ function NanoBanana2Editor({
   );
 }
 
+const GPT_IMAGE_2_POPULAR_SIZES = new Set([
+  'auto',
+  '1024x1024',
+  '1536x1024',
+  '1024x1536',
+  '2048x2048',
+  '2048x1152',
+  '3840x2160',
+  '2160x3840',
+]);
+
+/** Older workflows used `aspectRatio` — map to OpenAI popular `size` strings. */
+const GPT_IMAGE_2_LEGACY_ASPECT_TO_SIZE: Record<string, string> = {
+  '1:1': '1024x1024',
+  '3:4': '1024x1536',
+  '4:3': '1536x1024',
+  '3:2': '1536x1024',
+  '2:3': '1024x1536',
+  '9:16': '1024x1536',
+  '16:9': '2048x1152',
+  '21:9': 'auto',
+  '5:4': '1536x1024',
+  '4:5': '1024x1536',
+  '1:2': '1024x1536',
+  '2:1': '1536x1024',
+  '1:8': 'auto',
+  '8:1': 'auto',
+};
+
+function GptImage2Editor({
+  nodeId,
+  data,
+  updateNodeData,
+}: {
+  nodeId: string;
+  data: Record<string, any>;
+  updateNodeData: (id: string, data: Record<string, any>) => void;
+}) {
+  const edges = useWorkflowStore((s) => s.edges);
+  const allNodes = useWorkflowStore((s) => s.nodes);
+  const removeEdgesByIds = useWorkflowStore((s) => s.removeEdgesByIds);
+
+  const refImageCount = (data.refImageCount as number) || 1;
+
+  const imageSizeSelectValue = useMemo(() => {
+    const cur = String(data.imageSize || '').trim();
+    if (GPT_IMAGE_2_POPULAR_SIZES.has(cur)) return cur;
+    const ar = String(data.aspectRatio || '').trim();
+    return GPT_IMAGE_2_LEGACY_ASPECT_TO_SIZE[ar] || 'auto';
+  }, [data.imageSize, data.aspectRatio]);
+
+  const promptEdge = useMemo(
+    () => edges.find((e) => e.target === nodeId && e.targetHandle === 'prompt'),
+    [edges, nodeId],
+  );
+
+  const connectedPrompt = useMemo(() => {
+    if (!promptEdge) return null;
+    return resolveUpstreamTextOutput(promptEdge.source, edges, allNodes).trim();
+  }, [promptEdge, edges, allNodes, nodeId]);
+
+  const isPromptConnected = promptEdge != null;
+
+  const update = (key: string, value: any) => updateNodeData(nodeId, { [key]: value });
+
+  const handleRemoveImage = () => {
+    if (refImageCount <= 1) return;
+    const handleToRemove = `referenceImage${refImageCount}`;
+    const edgesToRemove = edges
+      .filter((e) => e.target === nodeId && e.targetHandle === handleToRemove)
+      .map((e) => e.id);
+    if (edgesToRemove.length > 0) {
+      removeEdgesByIds(edgesToRemove);
+    }
+    updateNodeData(nodeId, { refImageCount: refImageCount - 1 });
+  };
+
+  const fmt = (data.outputFormat as string) || 'png';
+  const showCompression = fmt === 'jpeg' || fmt === 'webp';
+
+  return (
+    <div className="prop-group">
+      <div className="inspector-empty-small" style={{ opacity: 0.75, marginBottom: 8, fontFamily: 'ui-monospace, monospace' }}>
+        gpt-image-2
+      </div>
+
+      <label className="inspector-label">
+        Prompt
+        {isPromptConnected && (
+          <span className="inspector-connected-badge">connected</span>
+        )}
+      </label>
+      {isPromptConnected ? (
+        <div className="inspector-connected-prompt">
+          <div className="connected-prompt-text">
+            {connectedPrompt && connectedPrompt.length > 0
+              ? connectedPrompt
+              : '(empty from source — check upstream text nodes)'}
+          </div>
+          <div className="connected-prompt-hint">
+            Prompt is driven by connected node. Disconnect to edit manually.
+          </div>
+        </div>
+      ) : (
+        <textarea
+          className="inspector-textarea"
+          value={data.prompt as string}
+          onChange={(e) => update('prompt', e.target.value)}
+          rows={3}
+          placeholder="Describe the image you want to generate..."
+        />
+      )}
+
+      <label className="inspector-label">Reference Images</label>
+      <div className="combine-input-controls">
+        <span className="combine-input-count">
+          {refImageCount} image input{refImageCount > 1 ? 's' : ''}
+        </span>
+        <button
+          type="button"
+          className="inspector-btn-small"
+          disabled={refImageCount >= GPT_IMAGE_2_MAX_REFERENCE_IMAGES}
+          onClick={() => update('refImageCount', refImageCount + 1)}
+        >
+          + Add
+        </button>
+        <button
+          type="button"
+          className="inspector-btn-small danger"
+          onClick={handleRemoveImage}
+          disabled={refImageCount <= 1}
+        >
+          − Remove
+        </button>
+      </div>
+
+      <label className="inspector-label">Output size</label>
+      <select
+        className="inspector-select"
+        value={imageSizeSelectValue}
+        onChange={(e) => updateNodeData(nodeId, { imageSize: e.target.value })}
+      >
+        <option value="auto">Auto</option>
+        <option value="1024x1024">1:1 · 1K</option>
+        <option value="1536x1024">3:2 · 1K</option>
+        <option value="1024x1536">2:3 · 1K</option>
+        <option value="2048x2048">1:1 · 2K</option>
+        <option value="2048x1152">16:9 · 2K</option>
+        <option value="3840x2160">16:9 · 4K</option>
+        <option value="2160x3840">9:16 · 4K</option>
+      </select>
+
+      <label className="inspector-label">Quality</label>
+      <select
+        className="inspector-select"
+        value={(data.quality as string) || 'auto'}
+        onChange={(e) => update('quality', e.target.value)}
+      >
+        <option value="auto">Auto</option>
+        <option value="low">Low (fast)</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+      </select>
+
+      <label className="inspector-label">Output format</label>
+      <select
+        className="inspector-select"
+        value={(data.outputFormat as string) || 'png'}
+        onChange={(e) => update('outputFormat', e.target.value)}
+      >
+        <option value="png">PNG</option>
+        <option value="jpeg">JPEG</option>
+        <option value="webp">WebP</option>
+      </select>
+
+      {showCompression && (
+        <>
+          <label className="inspector-label">Compression (0–100%, JPEG/WebP)</label>
+          <input
+            className="inspector-input"
+            type="number"
+            min={0}
+            max={100}
+            value={Number(data.outputCompression) || 0}
+            onChange={(e) => update('outputCompression', Math.max(0, Math.min(100, parseInt(e.target.value) || 0)))}
+          />
+        </>
+      )}
+
+      <label className="inspector-label">Moderation</label>
+      <select
+        className="inspector-select"
+        value={(data.moderation as string) || 'auto'}
+        onChange={(e) => update('moderation', e.target.value)}
+      >
+        <option value="auto">Auto</option>
+        <option value="low">Low</option>
+      </select>
+    </div>
+  );
+}
+
 function ImageScfPromptEditor({
   nodeId,
   data,
@@ -1399,8 +1601,8 @@ function ImageScfPromptEditor({
 
   return (
     <div className="prop-group">
-      <div className="inspector-empty-small" style={{ opacity: 0.6, marginBottom: 8 }}>
-        Model: gemini-2.5-flash (vision → text). Uses Settings Gemini key unless overridden below.
+      <div className="inspector-empty-small" style={{ opacity: 0.75, marginBottom: 8, fontFamily: 'ui-monospace, monospace' }}>
+        gemini-2.5-flash
       </div>
 
       <label className="inspector-label">Analyze</label>
@@ -1430,16 +1632,6 @@ function ImageScfPromptEditor({
           <span>Feel (very short mood tags)</span>
         </label>
       </div>
-
-      <label className="inspector-label">API key override (optional)</label>
-      <input
-        className="inspector-input"
-        type="password"
-        autoComplete="off"
-        placeholder="Leave empty to use Settings / env"
-        value={(data.apiKey as string) || ''}
-        onChange={(e) => update('apiKey', e.target.value)}
-      />
     </div>
   );
 }

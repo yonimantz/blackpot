@@ -86,7 +86,12 @@ export default function RunButton() {
         if (result.error) {
           const node = useWorkflowStore.getState().nodes.find((n) => n.id === nodeId);
           const label = (node?.data?.label as string) || node?.type || nodeId;
-          errors.push(`${label}: ${result.error}`);
+          let msg = String(result.error);
+          const dup = `${label}: `;
+          if (msg.startsWith(dup)) {
+            msg = msg.slice(dup.length);
+          }
+          errors.push(`${label}: ${msg}`);
         }
       }
       if (errors.length > 0) {

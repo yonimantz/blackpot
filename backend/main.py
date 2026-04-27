@@ -47,6 +47,12 @@ def _user_gemini_key(store, user: dict | None) -> str | None:
     return store.get_user_gemini_key(user['uid'])
 
 
+def _user_openai_key(store, user: dict | None) -> str | None:
+    if not user or not user.get('uid'):
+        return None
+    return store.get_user_openai_key(user['uid'])
+
+
 async def require_user(authorization: str | None = Header(None)) -> dict | None:
     if not auth_firebase.auth_enabled():
         return None
@@ -87,7 +93,8 @@ def _run_context_for_user(user: dict | None) -> RunContext:
     store = get_persistence()
     owner_uid = user['uid'] if user else None
     gkey = _user_gemini_key(store, user)
-    return RunContext(owner_uid=owner_uid, gemini_user_key=gkey)
+    okey = _user_openai_key(store, user)
+    return RunContext(owner_uid=owner_uid, gemini_user_key=gkey, openai_user_key=okey)
 
 
 @app.post('/api/run')
@@ -234,6 +241,54 @@ async def api_clear_gemini_key(user: dict | None = Depends(require_user)):
         raise HTTPException(status_code=400, detail='Sign in required')
     store = get_persistence()
     store.clear_user_gemini_key(user['uid'])
+    return {'ok': True}
+
+
+# ---------------------------------------------------------------------------
+# User settings (OpenAI API key)
+# ---------------------------------------------------------------------------
+
+
+class OpenAIKeyPayload(BaseModel):
+    apiKey: str
+
+
+@app.get('/api/user/openai-key')
+async def api_openai_key_status(user: dict | None = Depends(require_user)):
+    if not user:
+        return {
+            'hasKey': bool(os.getenv('OPENAI_API_KEY', '').strip()),
+            'managedByEnv': True,
+        }
+    store = get_persistence()
+    k = store.get_user_openai_key(user['uid'])
+    return {'hasKey': bool(k and k.strip()), 'managedByEnv': False}
+
+
+@app.put('/api/user/openai-key')
+async def api_set_openai_key(
+    payload: OpenAIKeyPayload,
+    user: dict | None = Depends(require_user),
+):
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail='Sign in is required to save a personal API key.',
+        )
+    key = (payload.apiKey or '').strip()
+    if not key:
+        raise HTTPException(status_code=400, detail='apiKey is required')
+    store = get_persistence()
+    store.set_user_openai_key(user['uid'], key)
+    return {'ok': True}
+
+
+@app.delete('/api/user/openai-key')
+async def api_clear_openai_key(user: dict | None = Depends(require_user)):
+    if not user:
+        raise HTTPException(status_code=400, detail='Sign in required')
+    store = get_persistence()
+    store.clear_user_openai_key(user['uid'])
     return {'ok': True}
 
 

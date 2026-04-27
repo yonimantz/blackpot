@@ -119,7 +119,7 @@ VALUE_TYPES = {'numberValue', 'colorValue'}
 TEXT_TYPES = {'prompt', 'combinePrompts', 'refMapper', 'sketch2Final', 'studio'}
 READ_TYPES = {'getImageSize', 'getColorPalette'}
 IO_TYPES = {'importImage', 'exportImage', 'preview'}
-AI_TYPES = {'nanoBananaPro', 'nanoBanana2', 'nanoBanana2Free', 'imageScfPrompt'}
+AI_TYPES = {'nanoBananaPro', 'nanoBanana2', 'nanoBanana2Free', 'imageScfPrompt', 'gptImage2'}
 
 # AI nodes that output text on the `text` handle (bypass must not force image passthrough).
 AI_TEXT_OUTPUT_TYPES = {'imageScfPrompt'}

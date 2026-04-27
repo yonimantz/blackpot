@@ -103,6 +103,8 @@ def init_db():
         conn.execute('ALTER TABLE workflows ADD COLUMN icon_color TEXT')
     if not _column_exists(conn, 'collection', 'folder_id'):
         conn.execute('ALTER TABLE collection ADD COLUMN folder_id TEXT')
+    if not _column_exists(conn, 'user_secrets', 'openai_api_key'):
+        conn.execute('ALTER TABLE user_secrets ADD COLUMN openai_api_key TEXT')
     conn.commit()
     conn.close()
 
@@ -570,28 +572,99 @@ def get_collection_filepath(img_id: str, owner_uid: str = LEGACY_OWNER_SENTINEL)
     return path if os.path.exists(path) else None
 
 
+def _secret_nonempty(val: str | None) -> bool:
+    return bool(val and str(val).strip())
+
+
 def get_user_gemini_key_sqlite(uid: str) -> str | None:
     conn = _get_conn()
     row = conn.execute(
         'SELECT gemini_api_key FROM user_secrets WHERE uid = ?', (uid,)
     ).fetchone()
     conn.close()
-    return row['gemini_api_key'] if row else None
+    if not row:
+        return None
+    k = row['gemini_api_key']
+    return k if _secret_nonempty(k) else None
 
 
 def set_user_gemini_key_sqlite(uid: str, api_key: str) -> None:
     conn = _get_conn()
-    conn.execute(
-        """INSERT INTO user_secrets (uid, gemini_api_key) VALUES (?, ?)
-           ON CONFLICT(uid) DO UPDATE SET gemini_api_key = excluded.gemini_api_key""",
-        (uid, api_key),
-    )
+    row = conn.execute(
+        'SELECT openai_api_key FROM user_secrets WHERE uid = ?', (uid,)
+    ).fetchone()
+    if row:
+        conn.execute(
+            'UPDATE user_secrets SET gemini_api_key = ? WHERE uid = ?',
+            (api_key, uid),
+        )
+    else:
+        conn.execute(
+            'INSERT INTO user_secrets (uid, gemini_api_key, openai_api_key) VALUES (?, ?, NULL)',
+            (uid, api_key),
+        )
     conn.commit()
     conn.close()
 
 
 def clear_user_gemini_key_sqlite(uid: str) -> None:
     conn = _get_conn()
-    conn.execute('DELETE FROM user_secrets WHERE uid = ?', (uid,))
+    conn.execute(
+        "UPDATE user_secrets SET gemini_api_key = '' WHERE uid = ?",
+        (uid,),
+    )
+    conn.execute(
+        """DELETE FROM user_secrets WHERE uid = ?
+           AND IFNULL(TRIM(gemini_api_key), '') = ''
+           AND IFNULL(TRIM(openai_api_key), '') = ''""",
+        (uid,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_openai_key_sqlite(uid: str) -> str | None:
+    conn = _get_conn()
+    row = conn.execute(
+        'SELECT openai_api_key FROM user_secrets WHERE uid = ?', (uid,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    k = row['openai_api_key']
+    return k if _secret_nonempty(k) else None
+
+
+def set_user_openai_key_sqlite(uid: str, api_key: str) -> None:
+    conn = _get_conn()
+    row = conn.execute(
+        'SELECT gemini_api_key FROM user_secrets WHERE uid = ?', (uid,)
+    ).fetchone()
+    if row:
+        conn.execute(
+            'UPDATE user_secrets SET openai_api_key = ? WHERE uid = ?',
+            (api_key, uid),
+        )
+    else:
+        conn.execute(
+            'INSERT INTO user_secrets (uid, gemini_api_key, openai_api_key) VALUES (?, ?, ?)',
+            (uid, '', api_key),
+        )
+    conn.commit()
+    conn.close()
+
+
+def clear_user_openai_key_sqlite(uid: str) -> None:
+    conn = _get_conn()
+    conn.execute(
+        'UPDATE user_secrets SET openai_api_key = NULL WHERE uid = ?',
+        (uid,),
+    )
+    conn.execute(
+        """DELETE FROM user_secrets WHERE uid = ?
+           AND IFNULL(TRIM(gemini_api_key), '') = ''
+           AND IFNULL(TRIM(openai_api_key), '') = ''""",
+        (uid,),
+    )
     conn.commit()
     conn.close()

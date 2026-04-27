@@ -3,6 +3,7 @@ import base64
 import io
 import os
 
+import httpx
 from PIL import Image
 
 try:
@@ -14,6 +15,7 @@ except ImportError:
 
 NANO_MODEL = 'gemini-3-pro-image-preview'
 NANO2_MODEL = 'gemini-3.1-flash-image-preview'
+GPT_IMAGE_2_MODEL = 'gpt-image-2'
 # gemini-2.0-flash is not available to new API users; 2.5 Flash is the current workhorse for vision→text.
 IMAGE_ANALYZER_MODEL = 'gemini-2.5-flash'
 
@@ -71,6 +73,94 @@ def resolve_gemini_api_key(data: dict) -> str:
     except Exception:
         pass
     return os.getenv('GEMINI_API_KEY', '').strip()
+
+
+def resolve_openai_api_key(data: dict) -> str:
+    """Per-node apiKey overrides user key from run context, then OPENAI_API_KEY env."""
+    node_key = (data.get('apiKey', '') or '').strip()
+    if node_key:
+        return node_key
+    try:
+        from request_context import get_run_context
+        ctx = get_run_context()
+        if ctx and ctx.openai_user_key and str(ctx.openai_user_key).strip():
+            return str(ctx.openai_user_key).strip()
+    except Exception:
+        pass
+    return os.getenv('OPENAI_API_KEY', '').strip()
+
+
+# Documented popular `size` values for gpt-image-2 (OpenAI image generation guide).
+# The API also accepts other WxH strings within constraints (16px steps, ratio ≤3:1, etc.).
+GPT_IMAGE_2_POPULAR_SIZES = frozenset({
+    'auto',
+    '1024x1024',
+    '1536x1024',
+    '1024x1536',
+    '2048x2048',
+    '2048x1152',
+    '3840x2160',
+    '2160x3840',
+})
+
+# Legacy nodes stored `aspectRatio` only — map to closest documented preset or auto.
+GPT_IMAGE_2_LEGACY_ASPECT_TO_SIZE = {
+    '1:1': '1024x1024',
+    '3:4': '1024x1536',
+    '4:3': '1536x1024',
+    '3:2': '1536x1024',
+    '2:3': '1024x1536',
+    '9:16': '1024x1536',
+    '16:9': '2048x1152',
+    '21:9': 'auto',
+    '5:4': '1536x1024',
+    '4:5': '1024x1536',
+    '1:2': '1024x1536',
+    '2:1': '1536x1024',
+    # Long:short must be ≤ 3:1 — these presets cannot be expressed; let the API pick.
+    '1:8': 'auto',
+    '8:1': 'auto',
+}
+
+
+def _gpt_image_2_resolve_size(data: dict) -> str:
+    raw = (data.get('imageSize') or '').strip()
+    if raw in GPT_IMAGE_2_POPULAR_SIZES:
+        return raw
+    legacy = (data.get('aspectRatio') or '').strip()
+    return GPT_IMAGE_2_LEGACY_ASPECT_TO_SIZE.get(legacy, 'auto')
+
+
+# Image *edits* endpoint documents a smaller `size` enum than generations for GPT Image.
+GPT_IMAGE_2_EDITS_ALLOWED_SIZES = frozenset({
+    'auto',
+    '1024x1024',
+    '1536x1024',
+    '1024x1536',
+})
+
+
+def _gpt_image_2_edits_size(resolved: str) -> str:
+    if resolved in GPT_IMAGE_2_EDITS_ALLOWED_SIZES:
+        return resolved
+    return 'auto'
+
+
+def _gpt_image_2_decode_response_image(payload: dict) -> tuple[bytes | None, dict | None]:
+    """Parse OpenAI images JSON; return (bytes, None) or (None, error_dict)."""
+    data_arr = payload.get('data') or []
+    if not data_arr:
+        return None, {'error': 'GPT Image 2: API returned no image data.'}
+    item = data_arr[0]
+    if not isinstance(item, dict):
+        return None, {'error': 'GPT Image 2: unexpected response shape.'}
+    b64 = item.get('b64_json')
+    if not b64:
+        return None, {'error': 'GPT Image 2: response missing b64_json.'}
+    try:
+        return base64.b64decode(b64), None
+    except Exception:
+        return None, {'error': 'GPT Image 2: could not decode image bytes.'}
 
 
 def _is_gemini_api_key_auth_error(err_msg: str) -> bool:
@@ -149,6 +239,36 @@ def _collect_reference_images(inputs: dict) -> list[str]:
         else:
             break
     return refs
+
+
+# OpenAI image *edits* accepts multiple files; docs show several inputs — cap for stability.
+GPT_IMAGE_2_MAX_REFERENCE_IMAGES = 8
+
+
+def _collect_gpt_image_2_reference_files(inputs: dict) -> list[tuple[bytes, str]]:
+    """Decode reference image ports to (bytes, mime_type) for multipart edits."""
+    out: list[tuple[bytes, str]] = []
+    i = 1
+    while True:
+        raw = inputs.get(f'referenceImage{i}')
+        if not raw:
+            break
+        s = str(raw).strip()
+        mime = 'image/png'
+        try:
+            if s.startswith('data:'):
+                head, b64part = s.split(',', 1)
+                if ';' in head:
+                    mime = head[5:].split(';')[0].strip() or mime
+                out.append((base64.b64decode(b64part), mime))
+            else:
+                out.append((base64.b64decode(_strip_data_url(s)), mime))
+        except Exception as e:
+            raise ValueError(
+                f'GPT Image 2: could not decode reference image {i}.'
+            ) from e
+        i += 1
+    return out
 
 
 async def _execute_nano_banana_pro(data: dict, inputs: dict) -> dict:
@@ -532,6 +652,153 @@ async def _execute_image_scf_prompt(data: dict, inputs: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# GPT Image 2  —  OpenAI Images API (generations + edits with reference images)
+# ---------------------------------------------------------------------------
+
+
+def _gpt_image_2_openai_error_detail(resp: httpx.Response) -> str:
+    try:
+        err_json = resp.json()
+        err_obj = err_json.get('error', err_json)
+        if isinstance(err_obj, dict):
+            return str(err_obj.get('message', err_obj))
+        return str(err_obj)
+    except Exception:
+        return (resp.text or '')[:500]
+
+
+async def _execute_gpt_image_2(data: dict, inputs: dict) -> dict:
+    api_key = resolve_openai_api_key(data)
+    if not api_key:
+        return {
+            'error': (
+                'GPT Image 2: no API key configured. '
+                'Add your key in Settings, set OPENAI_API_KEY in backend/.env, or set apiKey on the node.'
+            ),
+        }
+
+    prompt = (inputs.get('prompt') or data.get('prompt') or '').strip()
+    if not prompt:
+        return {'error': 'GPT Image 2: no prompt provided'}
+
+    try:
+        ref_files = _collect_gpt_image_2_reference_files(inputs)
+    except ValueError as e:
+        return {'error': str(e)}
+
+    if len(ref_files) > GPT_IMAGE_2_MAX_REFERENCE_IMAGES:
+        return {
+            'error': (
+                f'GPT Image 2: at most {GPT_IMAGE_2_MAX_REFERENCE_IMAGES} reference images '
+                '(connect inputs in order: Image 1, Image 2, …).'
+            ),
+        }
+
+    size = _gpt_image_2_resolve_size(data)
+
+    quality = data.get('quality', 'auto')
+    if quality not in ('low', 'medium', 'high', 'auto'):
+        quality = 'auto'
+
+    output_format = data.get('outputFormat', 'png')
+    if output_format not in ('png', 'jpeg', 'webp'):
+        output_format = 'png'
+
+    moderation = data.get('moderation', 'auto')
+    if moderation not in ('auto', 'low'):
+        moderation = 'auto'
+
+    comp_val: int | None = None
+    comp = data.get('outputCompression')
+    if output_format in ('jpeg', 'webp') and comp is not None:
+        try:
+            c = int(comp)
+            if 0 <= c <= 100:
+                comp_val = c
+        except (TypeError, ValueError):
+            pass
+
+    headers_auth = {'Authorization': f'Bearer {api_key}'}
+
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            if ref_files:
+                edits_size = _gpt_image_2_edits_size(size)
+                form_data: dict[str, str] = {
+                    'model': GPT_IMAGE_2_MODEL,
+                    'prompt': prompt,
+                    'size': edits_size,
+                    'quality': quality,
+                    'output_format': output_format,
+                    'moderation': moderation,
+                }
+                if comp_val is not None:
+                    form_data['output_compression'] = str(comp_val)
+
+                file_parts: list[tuple[str, tuple[str, bytes, str]]] = []
+                for idx, (img_bytes, mime) in enumerate(ref_files):
+                    ext = '.png'
+                    if 'jpeg' in mime or 'jpg' in mime:
+                        ext = '.jpg'
+                    elif 'webp' in mime:
+                        ext = '.webp'
+                    file_parts.append(
+                        ('image[]', (f'ref_{idx}{ext}', img_bytes, mime or 'image/png')),
+                    )
+
+                resp = await client.post(
+                    'https://api.openai.com/v1/images/edits',
+                    headers=headers_auth,
+                    data=form_data,
+                    files=file_parts,
+                )
+            else:
+                body: dict = {
+                    'model': GPT_IMAGE_2_MODEL,
+                    'prompt': prompt,
+                    'n': 1,
+                    'size': size,
+                    'quality': quality,
+                    'output_format': output_format,
+                }
+                if moderation in ('auto', 'low'):
+                    body['moderation'] = moderation
+                if comp_val is not None:
+                    body['output_compression'] = comp_val
+
+                resp = await client.post(
+                    'https://api.openai.com/v1/images/generations',
+                    json=body,
+                    headers={**headers_auth, 'Content-Type': 'application/json'},
+                )
+    except httpx.TimeoutException:
+        return {'error': 'GPT Image 2: request timed out.'}
+    except httpx.RequestError as e:
+        return {'error': f'GPT Image 2: network error — {e}'}
+
+    if resp.status_code != 200:
+        detail = _gpt_image_2_openai_error_detail(resp)
+        return {'error': f'GPT Image 2: API error ({resp.status_code}) — {detail}'}
+
+    try:
+        payload = resp.json()
+    except Exception:
+        return {'error': 'GPT Image 2: invalid JSON response from API.'}
+
+    img_bytes, err = _gpt_image_2_decode_response_image(payload)
+    if err:
+        return err
+
+    mime = {
+        'png': 'image/png',
+        'jpeg': 'image/jpeg',
+        'webp': 'image/webp',
+    }.get(output_format, 'image/png')
+    out_b64 = base64.b64encode(img_bytes).decode('ascii')
+    return {'image': f'data:{mime};base64,{out_b64}'}
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -540,6 +807,8 @@ async def execute_ai_node(node_type: str, data: dict, inputs: dict) -> dict:
         return await _execute_nano_banana_pro(data, inputs)
     if node_type == 'nanoBanana2':
         return await _execute_nano_banana_2(data, inputs)
+    if node_type == 'gptImage2':
+        return await _execute_gpt_image_2(data, inputs)
     if node_type == 'imageScfPrompt':
         return await _execute_image_scf_prompt(data, inputs)
     if node_type == 'nanoBanana2Free':

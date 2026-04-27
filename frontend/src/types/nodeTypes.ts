@@ -314,7 +314,27 @@ export const NODE_TYPE_DEFINITIONS: Record<string, NodeTypeDefinition> = {
       analyzeFeel: true,
     },
   },
+  gptImage2: {
+    type: 'gptImage2',
+    label: 'GPT Image 2',
+    category: 'ai',
+    inputs: [{ id: 'prompt', label: 'Prompt', type: 'string' }],
+    outputs: [{ id: 'image', label: 'Image', type: 'image' }],
+    defaults: {
+      apiKey: '',
+      prompt: '',
+      imageSize: 'auto',
+      quality: 'auto',
+      outputFormat: 'png',
+      outputCompression: 80,
+      moderation: 'auto',
+      refImageCount: 1,
+    },
+  },
 };
+
+/** OpenAI image edits — multiple reference files; capped for stability. */
+export const GPT_IMAGE_2_MAX_REFERENCE_IMAGES = 8;
 
 export const PORT_TYPE_COLORS: Record<PortType, string> = {
   image: '#60a5fa',
@@ -350,7 +370,7 @@ export function getNodeInputs(type: string, data?: Record<string, any>): PortDef
     ];
   }
 
-  if (type === 'nanoBananaPro' || type === 'nanoBanana2') {
+  if (type === 'nanoBananaPro' || type === 'nanoBanana2' || type === 'gptImage2') {
     const count = (data?.refImageCount as number) || 1;
     return [
       { id: 'prompt', label: 'Prompt', type: 'string' as PortType },

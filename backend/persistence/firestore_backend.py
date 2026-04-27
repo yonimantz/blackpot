@@ -427,3 +427,22 @@ class FirestoreBackend:
         if not doc.exists:
             return
         ref.update({'geminiApiKey': DELETE_FIELD})
+
+    def get_user_openai_key(self, owner_uid: str) -> str | None:
+        doc = _db().collection('userSecrets').document(owner_uid).get()
+        if not doc.exists:
+            return None
+        key = (doc.to_dict() or {}).get('openaiApiKey')
+        return key if isinstance(key, str) and key.strip() else None
+
+    def set_user_openai_key(self, owner_uid: str, api_key: str) -> None:
+        _db().collection('userSecrets').document(owner_uid).set(
+            {'openaiApiKey': api_key}, merge=True,
+        )
+
+    def clear_user_openai_key(self, owner_uid: str) -> None:
+        ref = _db().collection('userSecrets').document(owner_uid)
+        doc = ref.get()
+        if not doc.exists:
+            return
+        ref.update({'openaiApiKey': DELETE_FIELD})

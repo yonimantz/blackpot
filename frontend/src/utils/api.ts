@@ -410,3 +410,39 @@ export async function clearUserGeminiKey(): Promise<void> {
     throw new Error(err?.detail || 'Failed to clear API key');
   }
 }
+
+// ---------------------------------------------------------------------------
+// User settings (OpenAI API key)
+// ---------------------------------------------------------------------------
+
+export async function getOpenAIKeyStatus(): Promise<{
+  hasKey: boolean;
+  managedByEnv: boolean;
+}> {
+  const res = await authFetch(`${API_BASE}/user/openai-key`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.detail || 'Failed to load key status');
+  }
+  return res.json();
+}
+
+export async function setUserOpenAIKey(apiKey: string): Promise<void> {
+  const res = await authFetch(`${API_BASE}/user/openai-key`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.detail || 'Failed to save API key');
+  }
+}
+
+export async function clearUserOpenAIKey(): Promise<void> {
+  const res = await authFetch(`${API_BASE}/user/openai-key`, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.detail || 'Failed to clear API key');
+  }
+}

@@ -7,6 +7,7 @@ import {
   PORT_TYPE_COLORS,
   getNodeInputs,
   isTextResizableNodeType,
+  GPT_IMAGE_2_MAX_REFERENCE_IMAGES,
 } from '../types/nodeTypes';
 import {
   REFMAPPER_MAX_ENTRIES,
@@ -159,6 +160,8 @@ export default function BaseNode({ id, type, data, selected }: NodeProps) {
           <NanoBananaProContent nodeId={id} data={data} />
         ) : type === 'nanoBanana2' ? (
           <NanoBanana2Content nodeId={id} data={data} />
+        ) : type === 'gptImage2' ? (
+          <GptImage2Content nodeId={id} data={data} />
         ) : type === 'imageScfPrompt' ? (
           <div className="node-ai-info inspector-empty-small" style={{ opacity: 0.75, padding: '4px 0' }}>
             Style / Content / Feel toggles in inspector
@@ -353,6 +356,36 @@ function NanoBanana2Content({ nodeId, data }: { nodeId: string; data: Record<str
           e.stopPropagation();
           updateNodeData(nodeId, { refImageCount: refImageCount + 1 });
         }}
+      >
+        <span className="ai-node-add-ref-icon" aria-hidden>+</span>
+        <span>Add Image</span>
+      </button>
+    </div>
+  );
+}
+
+function GptImage2Content({ nodeId, data }: { nodeId: string; data: Record<string, any> }) {
+  const updateNodeData = useWorkflowStore((s) => s.updateNodeData);
+  const refImageCount = (data.refImageCount as number) || 1;
+  const atMax = refImageCount >= GPT_IMAGE_2_MAX_REFERENCE_IMAGES;
+
+  return (
+    <div className="node-ai-info">
+      <button
+        type="button"
+        className="ai-node-add-ref-btn nopan nodrag"
+        title={
+          atMax
+            ? `At most ${GPT_IMAGE_2_MAX_REFERENCE_IMAGES} reference images`
+            : 'Add a reference image input'
+        }
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (atMax) return;
+          updateNodeData(nodeId, { refImageCount: refImageCount + 1 });
+        }}
+        disabled={atMax}
       >
         <span className="ai-node-add-ref-icon" aria-hidden>+</span>
         <span>Add Image</span>
@@ -648,6 +681,8 @@ function renderNodeContent(type: string, data: Record<string, any>, nodeId: stri
     case 'nanoBananaPro':
       return null;
     case 'nanoBanana2':
+      return null;
+    case 'gptImage2':
       return null;
     default:
       return null;
