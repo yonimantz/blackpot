@@ -1,6 +1,6 @@
-# Blackpot
+# SpotOn
 
-A ComfyUI-style node-based workflow editor for image generation and manipulation (React + Vite frontend, FastAPI backend). Runs locally as a single-user app against a local SQLite database.
+A node-based workflow editor for image generation and manipulation (React + Vite frontend, FastAPI backend). Runs locally as a single-user app against a local SQLite database.
 
 ## Project layout
 
@@ -8,27 +8,10 @@ A ComfyUI-style node-based workflow editor for image generation and manipulation
 |------|---------|
 | `frontend/` | React app (Vite, XYFlow canvas) |
 | `backend/` | FastAPI API, workflow engine, local SQLite persistence |
-| `assets/` | Shared branding assets (e.g. `logo.svg`) |
 | `docs/` | [Gemini API keys](docs/GEMINI_API_KEYS.md) |
 | `run.bat` | Windows: starts backend and frontend, opens the browser |
 
-The favicon and in-app icon are served from `frontend/public/` (e.g. `blackpot-icon.svg`). Use `assets/logo.svg` as an additional source asset when you need the same mark outside the web build.
-
-## GitHub
-
-This folder is a Git repo on branch **`main`**. Secrets stay out of Git (see `.gitignore`: `backend/.env`, `*.local`, `frontend/dist/`, etc.).
-
-To push to GitHub:
-
-1. Create a **new empty** repository on GitHub (no README, no license) — pick a name such as `blackpot`.
-2. From this repo root:
-
-```bat
-git remote add origin https://github.com/YOUR_USER/YOUR_REPO.git
-git push -u origin main
-```
-
-If Git asks for a password, use a [personal access token](https://github.com/settings/tokens) (classic: enable `repo` scope) instead of your account password.
+Branding assets live in `frontend/`: `src/assets/SpotOn-Icon.svg` is inlined into the workflow icons, and `public/SpotOn-Icon.svg` / `public/SpotOn-Logo.svg` are served as the favicon and the title-bar logo.
 
 ## Quick start
 
@@ -44,12 +27,12 @@ run.bat
 
 ```bash
 cd backend
-cp .env.example .env   # Unix — on Windows: copy .env.example .env
+copy .env.example .env   # Windows — on Unix: cp .env.example .env
 pip install -r requirements.txt
 python main.py
 ```
 
-Runs at `http://localhost:8000`. Set `GEMINI_API_KEY` in `backend/.env` for AI nodes; see [docs/GEMINI_API_KEYS.md](docs/GEMINI_API_KEYS.md). Per-user API keys can also be saved from the in-app **Settings** page (stored in the local SQLite DB).
+Runs at `http://localhost:8000`. API keys are normally saved from the in-app **Settings** page (stored in the local SQLite DB); a `GEMINI_API_KEY` in `backend/.env` works as a fallback. See [docs/GEMINI_API_KEYS.md](docs/GEMINI_API_KEYS.md).
 
 ### Frontend (React)
 
@@ -59,11 +42,15 @@ npm install
 npm run dev
 ```
 
-Runs at `http://localhost:5173`.
+Runs at `http://localhost:5173`, proxying `/api` to the backend.
 
 ### CORS
 
-Set `CORS_ORIGINS` in `backend/.env` to a comma-separated list of allowed origins if you change ports or run the frontend on a different host. Default `*` is fine for local dev.
+Set `CORS_ORIGINS` in `backend/.env` to a comma-separated list of allowed origins if you change ports or run the frontend on a different host. The default `*` is fine for local use.
+
+## Local data
+
+The backend keeps everything in `backend/`: `spoton.db` (workflows, collection metadata, saved API keys), plus the `collection/`, `uploads/`, and `exports/` folders. All of it is gitignored.
 
 ## Usage
 
@@ -80,7 +67,8 @@ Set `CORS_ORIGINS` in `backend/.env` to a comma-separated list of allowed origin
 ## Node types
 
 - **I/O**: Import Image, Export Image, Preview
-- **Tools**: Resize, Crop, Change Hue, Brightness, Contrast, Blur, Sharpen, Color Overlay, Rotate/Flip
-- **Values**: Number, Color Picker, Text, Boolean
-- **Read data**: Get Image Size, Get Dominant Colors, Get Pixel Color
-- **AI**: Gemini-backed nodes (per-user key in Settings, optional `GEMINI_API_KEY` fallback, or per-node `apiKey`)
+- **Tools**: Resize, Crop, Blur, Rotate/Flip, Editor, Compositor, Vignette, Remove Background, Key Color, Stack Images, Divider
+- **Values**: Number, Color Picker
+- **Text**: Prompt, Combine Prompts, Ref Mapper, Sketch to Final, Studio
+- **Read data**: Get Image Size, Get Color Palette
+- **AI**: Gemini (Nano Banana), GPT Image, and fal.ai nodes — keys come from Settings, a per-node `apiKey`, or the environment

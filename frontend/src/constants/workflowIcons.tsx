@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react';
 
-import rawSpotOnIcon from '@assets/Spot on Icon.svg?raw';
+import rawSpotOnIcon from '../assets/SpotOn-Icon.svg?raw';
 
 /** Must match backend database.py allow-list */
 export const DEFAULT_WORKFLOW_ICON_COLOR = '#ffffff';

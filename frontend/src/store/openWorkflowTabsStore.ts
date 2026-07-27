@@ -43,7 +43,7 @@ export const useOpenWorkflowTabsStore = create<OpenWorkflowTabsState>()(
       },
     }),
     {
-      name: 'blackpot-open-workflow-tabs',
+      name: 'spoton-open-workflow-tabs',
       storage: createJSONStorage(() => sessionStorage),
       partialize: (state) => ({ tabs: state.tabs }),
     },

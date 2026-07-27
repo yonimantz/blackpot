@@ -5,14 +5,18 @@ import uuid
 from datetime import datetime, timezone
 
 _BASE_DIR = os.path.dirname(__file__)
-DB_PATH = os.path.join(_BASE_DIR, 'blackpot.db')
-_LEGACY_DB = os.path.join(_BASE_DIR, 'weavy.db')
-if not os.path.exists(DB_PATH) and os.path.exists(_LEGACY_DB):
-    for suffix in ('', '-wal', '-shm'):
-        old = _LEGACY_DB + suffix if suffix else _LEGACY_DB
-        new = DB_PATH + suffix if suffix else DB_PATH
-        if os.path.exists(old):
-            os.replace(old, new)
+DB_PATH = os.path.join(_BASE_DIR, 'spoton.db')
+
+# The app shipped under earlier names; adopt the newest database found so
+# existing installs keep their workflows and collection.
+for _legacy_name in ('blackpot.db', 'weavy.db'):
+    _legacy_db = os.path.join(_BASE_DIR, _legacy_name)
+    if not os.path.exists(DB_PATH) and os.path.exists(_legacy_db):
+        for _suffix in ('', '-wal', '-shm'):
+            old = _legacy_db + _suffix
+            new = DB_PATH + _suffix
+            if os.path.exists(old):
+                os.replace(old, new)
 
 COLLECTION_DIR = os.path.join(_BASE_DIR, 'collection')
 os.makedirs(COLLECTION_DIR, exist_ok=True)

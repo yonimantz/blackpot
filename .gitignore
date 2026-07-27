@@ -20,6 +20,8 @@ venv/
 ENV/
 
 # Backend runtime data (local SQLite, uploads, generated files)
+backend/spoton.db
+backend/spoton.db-*
 backend/blackpot.db
 backend/weavy.db
 backend/uploads/

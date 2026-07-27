@@ -1,17 +1,17 @@
 @echo off
-title Blackpot
+title SpotOn
 echo ============================================
-echo        Starting Blackpot
+echo        Starting SpotOn
 echo ============================================
 echo.
 
 set "BASEDIR=%~dp0"
 
 echo [1/2] Starting Backend (FastAPI on port 8000)...
-start "Blackpot Backend" /D "%BASEDIR%backend" cmd /k python main.py
+start "SpotOn Backend" /D "%BASEDIR%backend" cmd /k python main.py
 
 echo [2/2] Starting Frontend (Vite on port 5173)...
-start "Blackpot Frontend" /D "%BASEDIR%frontend" cmd /k npm run dev
+start "SpotOn Frontend" /D "%BASEDIR%frontend" cmd /k npm run dev
 
 echo.
 echo Waiting for servers to start...

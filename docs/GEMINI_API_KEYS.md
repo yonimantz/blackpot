@@ -1,6 +1,6 @@
 # Gemini API keys and Google Cloud projects — notes for this project
 
-This document summarizes what matters from Google’s official guide on [using Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key) (including the **Google Cloud projects** section) and how it applies to **Blackpot**.
+This document summarizes what matters from Google's official guide on [using Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key) (including the **Google Cloud projects** section) and how it applies to **SpotOn**.
 
 ## Why Google Cloud projects matter
 
@@ -12,7 +12,7 @@ This document summarizes what matters from Google’s official guide on [using G
 
 ## What the official docs say about environment variables
 
-Google’s libraries automatically pick up:
+Google's libraries automatically pick up:
 
 | Variable           | Notes |
 |--------------------|--------|
@@ -21,42 +21,36 @@ Google’s libraries automatically pick up:
 
 Recommendation from Google: set **only one** of these for auto-discovery, to avoid confusion.
 
+SpotOn does not rely on auto-discovery — it reads `GEMINI_API_KEY` itself and passes the key explicitly to `genai.Client(api_key=...)`.
+
 ## How *this* project uses keys
 
-The **backend** calls Gemini with an explicit API key passed into `genai.Client(api_key=...)` (see `backend/nodes/ai_nodes.py` and `backend/engine.py`).
+The **backend** owns every AI call; keys never reach the browser.
 
 ### Resolution order (same for all AI image nodes)
 
 1. **Per-node `apiKey`** in the workflow (inspector), if non-empty.
-2. **Signed-in user’s saved key** (Settings in the app, stored server-side — SQLite `user_secrets` locally or Firestore `userSecrets/{uid}` in production).
-3. **`GEMINI_API_KEY` in `backend/.env`** (or Cloud Run env) as a **fallback**, useful for local development or a single shared dev key. Omit in production if every user should use their own key.
+2. **The key saved on the Settings page**, stored server-side in the local SQLite `user_secrets` table.
+3. **`GEMINI_API_KEY` in `backend/.env`** as a fallback.
 
-Helper: `resolve_gemini_api_key()` in `backend/nodes/ai_nodes.py`.
+Helper: `resolve_gemini_api_key()` in `backend/nodes/ai_nodes.py`. The OpenAI and fal.ai nodes follow the same three-step order with `OPENAI_API_KEY` and `FAL_KEY`.
 
-### Invite-only / Firebase deployments
-
-- Do **not** bake API keys into the frontend bundle.
-- Each invited user pastes their key once on the **Settings** page; the FastAPI backend stores it with Firebase Admin (Firestore) or SQLite when running locally.
-- See [README.md](../README.md) for `FIREBASE_PROJECT_ID`, `ALLOWLIST_EMAILS`, and `AUTH_SKIP_ALLOWLIST`.
-
-## Security — critical for this repo
-
-Google’s rules align with how we should run this app:
+## Security
 
 1. **Treat keys like passwords** — quota, cost, and any uploaded workflow data flow through them.
-2. **Never commit API keys** — keep `backend/.env` out of git (use `.gitignore` and a `.env.example` with placeholders only).
-3. **Never expose keys in the browser** — the React app must not embed keys; Gemini calls stay on the **FastAPI backend**.
-4. **Restrict keys when possible** — in Cloud Console, restrict usage to the **Generative Language API** (and optionally IP / referrer where applicable).
+2. **Never commit API keys** — `backend/.env` is gitignored; `.env.example` holds placeholders only.
+3. **Keys stay on the backend** — the React app never embeds a key.
+4. **Restrict keys when possible** — in Cloud Console, restrict usage to the **Generative Language API**.
 5. **Rotate and audit** — if a key was ever leaked (chat, screenshot, public repo), **revoke and create a new key** in the same Cloud project.
+
+Note that keys saved from the Settings page are stored in plain text in the local database, which is readable by anyone with access to that Windows account. This is the same trust level as a `.env` file on the same machine.
 
 ## Operational checklist
 
-- [ ] Keys created under the **correct** Cloud project in [Google AI Studio](https://aistudio.google.com/) (or imported project).
+- [ ] Key created under the **correct** Cloud project in [Google AI Studio](https://aistudio.google.com/) (or an imported project).
 - [ ] Billing / quotas understood for that project (especially for image models).
-- [ ] Local: optional `GEMINI_API_KEY` in `backend/.env`, or per-user key in Settings when using Firebase Auth.
-- [ ] Production: invited users save their own keys; restrict `CORS_ORIGINS` and avoid a shared `GEMINI_API_KEY` on Cloud Run unless intentional.
+- [ ] Key entered on the **Settings** page, or set as `GEMINI_API_KEY` in `backend/.env`.
 - [ ] `.env` not tracked by version control.
-- [ ] After team changes, confirm Cloud project access and key permissions in AI Studio or Cloud Console.
 
 ## Reference
 

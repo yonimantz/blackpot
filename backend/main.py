@@ -31,7 +31,7 @@ from nodes.tool_nodes import run_remove_bg_raw
 from persistence import get_persistence
 from request_context import RunContext, reset_run_context, set_run_context
 
-app = FastAPI(title="Blackpot API")
+app = FastAPI(title="SpotOn API")
 
 _cors = os.getenv('CORS_ORIGINS', '*').strip()
 _origins = [o.strip() for o in _cors.split(',') if o.strip()] if _cors != '*' else ['*']

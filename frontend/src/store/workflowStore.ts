@@ -390,7 +390,7 @@ export interface WorkflowState {
   tryPasteWorkflowClipboardText: (text: string) => boolean;
 }
 
-const WEAVY_CLIPBOARD_PREFIX = 'weavy-workflow-clipboard:';
+const CLIPBOARD_PREFIX = 'spoton-workflow-clipboard:';
 
 function duplicateSubgraphAtOffset(
   get: () => WorkflowState,
@@ -1034,7 +1034,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       nodes: structuredClone(selectedNodes),
       edges: structuredClone(internalEdges),
     };
-    const str = WEAVY_CLIPBOARD_PREFIX + JSON.stringify(payload);
+    const str = CLIPBOARD_PREFIX + JSON.stringify(payload);
     try {
       await navigator.clipboard.writeText(str);
     } catch {
@@ -1043,10 +1043,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   tryPasteWorkflowClipboardText: (text) => {
-    if (!text.startsWith(WEAVY_CLIPBOARD_PREFIX)) return false;
+    if (!text.startsWith(CLIPBOARD_PREFIX)) return false;
     let parsed: { v?: number; nodes?: unknown; edges?: unknown };
     try {
-      parsed = JSON.parse(text.slice(WEAVY_CLIPBOARD_PREFIX.length));
+      parsed = JSON.parse(text.slice(CLIPBOARD_PREFIX.length));
     } catch {
       return false;
     }
