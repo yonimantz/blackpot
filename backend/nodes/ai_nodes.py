@@ -351,12 +351,6 @@ async def _execute_nano_banana_pro(data: dict, inputs: dict) -> dict:
             )
     contents.append(augmented_prompt)
 
-    # #region agent log
-    import json as _json, time as _time, pathlib as _pathlib
-    _lp = _pathlib.Path(__file__).resolve().parent.parent.parent / 'debug-5a1439.log'
-    _lp.open('a').write(_json.dumps({"sessionId":"5a1439","location":"ai_nodes.py:config","message":"config built","data":{"aspect_ratio":aspect_ratio,"resolution":resolution,"seed_val":seed_val,"model":NANO_MODEL,"image_config_str":str(image_config),"gen_config_str":str(gen_config),"prompt_len":len(prompt),"ref_count":len(ref_images)},"timestamp":int(_time.time()*1000),"hypothesisId":"H1,H3"})+'\n')
-    # #endregion
-
     def _sync_generate():
         return client.models.generate_content(
             model=NANO_MODEL,
@@ -366,14 +360,8 @@ async def _execute_nano_banana_pro(data: dict, inputs: dict) -> dict:
 
     try:
         response = await asyncio.to_thread(_sync_generate)
-        # #region agent log
-        _lp.open('a').write(_json.dumps({"sessionId":"5a1439","location":"ai_nodes.py:api_ok","message":"API call succeeded","data":{"has_candidates":bool(getattr(response,'candidates',None))},"timestamp":int(_time.time()*1000),"hypothesisId":"H2,H4"})+'\n')
-        # #endregion
     except Exception as e:
         err_msg = str(e)
-        # #region agent log
-        _lp.open('a').write(_json.dumps({"sessionId":"5a1439","location":"ai_nodes.py:api_error","message":"API call FAILED","data":{"error":err_msg[:500],"error_type":type(e).__name__},"timestamp":int(_time.time()*1000),"hypothesisId":"H1,H2"})+'\n')
-        # #endregion
         if _is_gemini_api_key_auth_error(err_msg):
             return {'error': f'Nano Banana Pro: Invalid or expired API key. Check your Gemini API key. ({err_msg})'}
         if 'not found' in err_msg.lower() or '404' in err_msg:
@@ -398,14 +386,6 @@ async def _execute_nano_banana_pro(data: dict, inputs: dict) -> dict:
 
             if isinstance(img_bytes, str):
                 img_bytes = base64.b64decode(img_bytes)
-
-            # #region agent log
-            try:
-                _tmp_img = Image.open(io.BytesIO(img_bytes))
-                _lp.open('a').write(_json.dumps({"sessionId":"5a1439","location":"ai_nodes.py:image_dims","message":"returned image dimensions","data":{"width":_tmp_img.width,"height":_tmp_img.height,"mime":mime,"requested_aspect":aspect_ratio},"timestamp":int(_time.time()*1000),"hypothesisId":"H4,H5"})+'\n')
-            except Exception:
-                pass
-            # #endregion
 
             img_bytes = _apply_resolution_output(img_bytes, resolution, mime)
 

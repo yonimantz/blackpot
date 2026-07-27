@@ -24,39 +24,6 @@ async function waitForBackend(signal?: AbortSignal): Promise<void> {
   );
 }
 
-export async function runWorkflow(
-  workflow: { nodes: any[]; edges: any[]; workflow_id?: string | null },
-  signal?: AbortSignal,
-): Promise<Record<string, any>> {
-  let res: Response;
-  try {
-    res = await authFetch(`${API_BASE}/run`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(workflow),
-      signal,
-    });
-  } catch (networkErr: any) {
-    if (networkErr.name === 'AbortError') throw networkErr;
-    await waitForBackend(signal);
-    res = await authFetch(`${API_BASE}/run`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(workflow),
-      signal,
-    });
-  }
-  if (!res.ok) {
-    const err = await res.json().catch(() => null);
-    const detail =
-      err?.detail ??
-      err?.message ??
-      `Backend returned HTTP ${res.status} ${res.statusText}`;
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
-  }
-  return res.json();
-}
-
 export interface StreamCallbacks {
   onNodeStart?: (nodeId: string) => void;
   onNodeDone?: (nodeId: string, result: any) => void;
@@ -403,11 +370,6 @@ export async function moveCollectionItems(
 export async function deleteCollectionItem(id: string): Promise<void> {
   const res = await authFetch(`${API_BASE}/collection/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error('Failed to delete image');
-}
-
-/** Plain URL (no auth). Prefer fetchCollectionImageBlob when Firebase auth is enabled. */
-export function getCollectionImageUrl(id: string): string {
-  return `${API_BASE}/collection/${id}/file`;
 }
 
 export async function fetchCollectionImageBlob(id: string): Promise<Blob> {

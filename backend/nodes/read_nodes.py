@@ -2,7 +2,6 @@ import base64
 import io
 import numpy as np
 from PIL import Image, ImageDraw
-from collections import Counter
 
 
 def _decode_image(data: str) -> Image.Image:

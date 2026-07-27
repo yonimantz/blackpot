@@ -6,8 +6,6 @@
  * UI feedback only.
  */
 
-import { encodeCanvasPreview } from './previewEncoding';
-
 export interface KeyColorSettings {
   keyColor: string;
   threshold: number; // 0..1
@@ -112,26 +110,3 @@ export function renderKeyColorPreview(
   return true;
 }
 
-/**
- * Compute a downsampled data URL for the node thumbnail. `maxDim` clamps the
- * larger side. Use a small value (e.g. 256) so the thumbnail update stays
- * cheap when the user drags sliders.
- */
-export function computeKeyColorThumbnail(
-  srcImg: HTMLImageElement,
-  settings: KeyColorSettings,
-  manualMaskCanvas: HTMLCanvasElement | null,
-  maxDim = 320,
-): string | null {
-  const iw = srcImg.naturalWidth;
-  const ih = srcImg.naturalHeight;
-  if (!iw || !ih) return null;
-  const s = Math.min(1, maxDim / Math.max(iw, ih));
-  const w = Math.max(1, Math.round(iw * s));
-  const h = Math.max(1, Math.round(ih * s));
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  if (!renderKeyColorPreview(c, srcImg, settings, manualMaskCanvas)) return null;
-  return encodeCanvasPreview(c, maxDim);
-}

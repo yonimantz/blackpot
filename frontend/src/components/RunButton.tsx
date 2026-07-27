@@ -50,21 +50,6 @@ export default function RunButton() {
       }
     } catch (err: any) {
       if (err.name === 'AbortError') return;
-      // #region agent log
-      fetch('http://127.0.0.1:7770/ingest/3f1222d0-2d27-430e-961f-5520cb868048', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '7a892f' },
-        body: JSON.stringify({
-          sessionId: '7a892f',
-          hypothesisId: 'H1',
-          runId: 'pre-fix',
-          location: 'RunButton.tsx:handleRun:catch',
-          message: 'runWorkflowStreaming threw',
-          data: { errName: err?.name, errMsg: String(err?.message ?? err).slice(0, 400) },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       alert('Workflow error: ' + (err.message || 'Unknown error'));
     } finally {
       abortRef.current = null;

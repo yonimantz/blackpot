@@ -12,10 +12,8 @@ from nodes.text_nodes import execute_text_node
 
 
 async def _safe_execute_nano_banana_pro(data: dict, inputs: dict) -> dict:
-    """Run Nano Banana Pro — pass through to ai_nodes with debug logging."""
-    import json as _json, time as _time, pathlib as _pathlib
-    _lp = _pathlib.Path(__file__).resolve().parent.parent / 'debug-f0f9ca.log'
-
+    """Run Nano Banana Pro, retrying with a minimal request when the API
+    rejects one of the optional generation parameters."""
     result = await execute_ai_node('nanoBananaPro', data, inputs)
 
     if not isinstance(result, dict) or 'error' not in result:
@@ -24,10 +22,6 @@ async def _safe_execute_nano_banana_pro(data: dict, inputs: dict) -> dict:
     err = result['error']
     if 'not supported' not in err.lower() and 'extra_forbidden' not in err.lower():
         return result
-
-    # #region agent log
-    _lp.open('a').write(_json.dumps({"sessionId":"f0f9ca","location":"engine.py:fallback","message":"param rejected, retrying minimal","data":{"original_error":err[:200]},"timestamp":int(_time.time()*1000)})+'\n')
-    # #endregion
 
     try:
         from google import genai
@@ -64,9 +58,6 @@ async def _safe_execute_nano_banana_pro(data: dict, inputs: dict) -> dict:
     try:
         response = await asyncio.to_thread(_gen)
     except Exception as e2:
-        # #region agent log
-        _lp.open('a').write(_json.dumps({"sessionId":"f0f9ca","location":"engine.py:fallback_fail","message":"fallback failed","data":{"error":str(e2)[:200]},"timestamp":int(_time.time()*1000)})+'\n')
-        # #endregion
         return {'error': f'Nano Banana Pro: API call failed — {e2}'}
 
     candidates = getattr(response, 'candidates', None)
@@ -84,14 +75,8 @@ async def _safe_execute_nano_banana_pro(data: dict, inputs: dict) -> dict:
             resolution = data.get('resolution', '1k')
             img_bytes = _apply_resolution_output(img_bytes, resolution, mime)
             b64 = base64.b64encode(img_bytes).decode('ascii')
-            # #region agent log
-            _lp.open('a').write(_json.dumps({"sessionId":"f0f9ca","location":"engine.py:fallback_ok","message":"fallback image extracted","data":{"mime":mime,"img_size_kb":len(img_bytes)//1024},"timestamp":int(_time.time()*1000)})+'\n')
-            # #endregion
             return {'image': f'data:{mime};base64,{b64}'}
 
-    # #region agent log
-    _lp.open('a').write(_json.dumps({"sessionId":"f0f9ca","location":"engine.py:no_image","message":"no inline_data in parts","data":{"num_parts":len(parts),"part_types":[type(p).__name__ for p in parts]},"timestamp":int(_time.time()*1000)})+'\n')
-    # #endregion
     return {'error': 'Nano Banana Pro: response contained no image data'}
 
 _cancel_event = asyncio.Event()
