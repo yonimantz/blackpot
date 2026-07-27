@@ -1,10 +1,8 @@
-"""Data backend: SQLite (local) or Firestore + Storage (production)."""
+"""Data backend: local SQLite."""
 
-import os
 from typing import Any, Protocol
 
 from .sqlite_backend import SqliteBackend
-from .firestore_backend import FirestoreBackend
 
 
 class Persistence(Protocol):
@@ -56,10 +54,10 @@ class Persistence(Protocol):
     def get_user_openai_key(self, owner_uid: str) -> str | None: ...
     def set_user_openai_key(self, owner_uid: str, api_key: str) -> None: ...
     def clear_user_openai_key(self, owner_uid: str) -> None: ...
+    def get_user_fal_key(self, owner_uid: str) -> str | None: ...
+    def set_user_fal_key(self, owner_uid: str, api_key: str) -> None: ...
+    def clear_user_fal_key(self, owner_uid: str) -> None: ...
 
 
 def get_persistence() -> Persistence:
-    backend = os.getenv('DATA_BACKEND', 'sqlite').strip().lower()
-    if backend == 'firestore':
-        return FirestoreBackend()
     return SqliteBackend()

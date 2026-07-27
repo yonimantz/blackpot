@@ -113,13 +113,14 @@ def is_cancelled() -> bool:
     return _cancel_event.is_set()
 
 TOOL_TYPES = {
-    'resize', 'crop', 'setAlpha', 'blur', 'rotate', 'editor', 'compositor', 'vignette',
+    'resize', 'crop', 'blur', 'rotate', 'editor', 'compositor', 'vignette',
+    'getChannel', 'setMask', 'simpleCombine', 'removeBg', 'keyColor', 'stackImages', 'divider',
 }
 VALUE_TYPES = {'numberValue', 'colorValue'}
 TEXT_TYPES = {'prompt', 'combinePrompts', 'refMapper', 'sketch2Final', 'studio'}
 READ_TYPES = {'getImageSize', 'getColorPalette'}
 IO_TYPES = {'importImage', 'exportImage', 'preview'}
-AI_TYPES = {'nanoBananaPro', 'nanoBanana2', 'nanoBanana2Free', 'imageScfPrompt', 'gptImage2'}
+AI_TYPES = {'nanoBananaPro', 'nanoBanana2', 'nanoBanana2Free', 'imageScfPrompt', 'gptImage2', 'falAi'}
 
 # AI nodes that output text on the `text` handle (bypass must not force image passthrough).
 AI_TEXT_OUTPUT_TYPES = {'imageScfPrompt'}
@@ -167,18 +168,37 @@ def topological_sort(nodes: list[dict], edges: list[dict]) -> list[str]:
     return order
 
 
-def resolve_inputs(node_id: str, node_data: dict, edges: list[dict],
-                   outputs: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def resolve_inputs(
+    node_id: str,
+    node_data: dict,
+    edges: list[dict],
+    outputs: dict[str, dict[str, Any]],
+    node_map: dict[str, dict] | None = None,
+) -> dict[str, Any]:
     """Gather input values for a node from connected outputs."""
     inputs: dict[str, Any] = {}
     for edge in edges:
         if edge['target'] == node_id:
             source_id = edge['source']
-            source_handle = edge.get('sourceHandle', '')
-            target_handle = edge.get('targetHandle', '')
+            # JSON null becomes None in Python; normalize so '' is never confused with missing keys.
+            source_handle = edge.get('sourceHandle') or ''
+            target_handle = edge.get('targetHandle') or ''
             source_outputs = outputs.get(source_id, {})
+            val = None
             if source_handle in source_outputs:
-                inputs[target_handle] = source_outputs[source_handle]
+                val = source_outputs[source_handle]
+            elif not source_handle and 'image' in source_outputs:
+                # Multi-output nodes (e.g. keyColor): default to main image when handle omitted.
+                val = source_outputs['image']
+            if val is not None:
+                th = target_handle
+                if not th and node_map:
+                    nt = node_map.get(node_id, {}).get('type')
+                    if nt in IO_TYPES:
+                        th = 'image'
+                if not th:
+                    continue
+                inputs[th] = val
     return inputs
 
 
@@ -290,6 +310,10 @@ async def run_workflow_streaming(
         if nid not in {n['id'] for n in bypassed_nodes}
     ]
     for nid in skipped_disconnected:
+        # Notes are decorative-only; never report them as skipped so they
+        # don't dim or show the SKIPPED badge after a run.
+        if node_map.get(nid, {}).get('type') == 'note':
+            continue
         results[nid] = {'skipped': True, 'reason': 'disconnected'}
 
     def _has_failed_ancestor(nid: str) -> bool:
@@ -329,7 +353,7 @@ async def run_workflow_streaming(
         if progress_callback:
             await progress_callback('node_start', {'nodeId': node_id})
 
-        inputs = resolve_inputs(node_id, node_data, edges, outputs)
+        inputs = resolve_inputs(node_id, node_data, edges, outputs, node_map)
 
         if node_data.get('bypassed', False):
             first_input_val = next(iter(inputs.values()), None) if inputs else None

@@ -15,6 +15,7 @@ export default function EditorLayerFields({
   const removeEdgesByIds = useWorkflowStore((s) => s.removeEdgesByIds);
   const layerCount = (data.layerCount as number) || 0;
   const layers = (data.layers as Record<string, any>) || {};
+  const bgHidden = Boolean(data.bgHidden);
 
   const updateLayer = (layerId: string, key: string, value: any) => {
     const updated = { ...layers };
@@ -26,7 +27,16 @@ export default function EditorLayerFields({
     if (disabled) return;
     const newCount = layerCount + 1;
     const updated = { ...layers };
-    updated[`layer${newCount}`] = { x: 0, y: 0, width: 0, height: 0, rotation: 0, flipH: false };
+    updated[`layer${newCount}`] = {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+      rotation: 0,
+      flipH: false,
+      opacity: 1.0,
+      hidden: false,
+    };
     updateNodeData(nodeId, { layerCount: newCount, layers: updated });
   };
 
@@ -46,6 +56,22 @@ export default function EditorLayerFields({
 
   return (
     <>
+      <div className="editor-layer-card" style={{ marginBottom: 10 }}>
+        <div className="editor-layer-card-header">BG Layer</div>
+        <label className="inspector-label" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={!bgHidden}
+            disabled={disabled}
+            onChange={(e) => updateNodeData(nodeId, { bgHidden: !e.target.checked })}
+          />
+          Show in output
+        </label>
+        <div className="inspector-empty-small" style={{ marginTop: 6 }}>
+          When off, the background is not composited (canvas size still follows the BG image).
+        </div>
+      </div>
+
       <label className="inspector-label">Layers</label>
       <div className="combine-input-controls">
         <span className="combine-input-count">
@@ -66,10 +92,31 @@ export default function EditorLayerFields({
 
       {Array.from({ length: layerCount }, (_, i) => {
         const id = `layer${i + 1}`;
-        const cfg = layers[id] || { x: 0, y: 0, width: 0, height: 0, rotation: 0, flipH: false };
+        const cfg = layers[id] || {
+          x: 0,
+          y: 0,
+          width: 0,
+          height: 0,
+          rotation: 0,
+          flipH: false,
+          opacity: 1.0,
+          hidden: false,
+        };
+        const opacity = Math.max(0, Math.min(1, Number(cfg.opacity ?? 1)));
         return (
           <div key={id} className="editor-layer-card">
-            <div className="editor-layer-card-header">Layer {i + 1}</div>
+            <div className="editor-layer-card-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <span>Layer {i + 1}</span>
+              <label className="inspector-label" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, fontWeight: 400 }}>
+                <input
+                  type="checkbox"
+                  checked={!cfg.hidden}
+                  disabled={disabled}
+                  onChange={(e) => updateLayer(id, 'hidden', !e.target.checked)}
+                />
+                Output
+              </label>
+            </div>
             <div className="editor-layer-fields">
               <div className="editor-field-row">
                 <label>X</label>
@@ -136,6 +183,22 @@ export default function EditorLayerFields({
                   Flip H
                 </label>
               </div>
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <label className="inspector-label" style={{ marginBottom: 2 }}>
+                Opacity (0-1)
+              </label>
+              <input
+                className="inspector-range"
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={opacity}
+                disabled={disabled}
+                onChange={(e) => updateLayer(id, 'opacity', parseFloat(e.target.value))}
+              />
+              <span className="range-value">{opacity.toFixed(2)}</span>
             </div>
           </div>
         );

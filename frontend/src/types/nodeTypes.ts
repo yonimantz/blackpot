@@ -12,6 +12,7 @@ export interface NodeCategory {
 }
 
 export const NODE_CATEGORIES: Record<string, NodeCategory> = {
+  general: { label: 'General', color: '#9ca3af' },
   io: { label: 'I/O', color: '#3b82f6' },
   tool: { label: 'Tools', color: '#f59e0b' },
   text: { label: 'Text', color: '#14b8a6' },
@@ -35,6 +36,23 @@ export const MAX_COMPOSITOR_LAYERS = 24;
 /** Keep in sync with backend `tool_nodes.MAX_VIGNETTE_LAYERS`. */
 export const MAX_VIGNETTE_LAYERS = 4;
 
+/** Keep in sync with backend `tool_nodes.MAX_STACK_IMAGES`. */
+export const MAX_STACK_IMAGES = 12;
+
+/** Max number of image inputs on an Export Image node. */
+export const MAX_EXPORT_IMAGES = 24;
+
+/** Keep in sync with backend `tool_nodes.MAX_DIVIDER_OUTPUTS`. */
+export const MAX_DIVIDER_OUTPUTS = 16;
+
+/**
+ * Default canvas size for a fresh Preview node. Locked at creation so
+ * incoming run results don't make the node grow/shrink to fit the image —
+ * the user can resize it manually with the NodeResizer if desired.
+ */
+export const DEFAULT_PREVIEW_NODE_WIDTH = 240;
+export const DEFAULT_PREVIEW_NODE_HEIGHT = 220;
+
 /** Canvas nodes that show editable or scrollable text and support drag-resize (like Preview). */
 export const TEXT_RESIZABLE_NODE_TYPES: ReadonlySet<string> = new Set([
   'prompt',
@@ -42,13 +60,54 @@ export const TEXT_RESIZABLE_NODE_TYPES: ReadonlySet<string> = new Set([
   'refMapper',
   'sketch2Final',
   'studio',
+  'note',
 ]);
 
 export function isTextResizableNodeType(type: string): boolean {
   return TEXT_RESIZABLE_NODE_TYPES.has(type);
 }
 
+/**
+ * Categories whose nodes may be pinned into a workflow template. Tools and
+ * Read Data are deliberately excluded: they are plumbing, not something a
+ * template user should be asked about.
+ */
+export const PINNABLE_NODE_CATEGORIES: ReadonlySet<string> = new Set([
+  'general',
+  'io',
+  'text',
+  'value',
+  'ai',
+]);
+
+/**
+ * Pinned nodes of these types feed the template's result panel instead of
+ * appearing as a form field.
+ */
+export const TEMPLATE_OUTPUT_NODE_TYPES: ReadonlySet<string> = new Set([
+  'preview',
+  'exportImage',
+]);
+
+export function isNodeTypePinnable(type: string | undefined): boolean {
+  if (!type) return false;
+  const def = NODE_TYPE_DEFINITIONS[type];
+  return !!def && PINNABLE_NODE_CATEGORIES.has(def.category);
+}
+
+export function isTemplateOutputNodeType(type: string | undefined): boolean {
+  return !!type && TEMPLATE_OUTPUT_NODE_TYPES.has(type);
+}
+
 export const NODE_TYPE_DEFINITIONS: Record<string, NodeTypeDefinition> = {
+  note: {
+    type: 'note',
+    label: 'Note',
+    category: 'general',
+    inputs: [],
+    outputs: [],
+    defaults: { value: '' },
+  },
   prompt: {
     type: 'prompt',
     label: 'Prompt',
@@ -115,9 +174,13 @@ export const NODE_TYPE_DEFINITIONS: Record<string, NodeTypeDefinition> = {
     type: 'exportImage',
     label: 'Export Image',
     category: 'io',
-    inputs: [{ id: 'image', label: 'Image', type: 'image' }],
+    inputs: [{ id: 'image1', label: 'Image 1', type: 'image' }],
     outputs: [],
-    defaults: { fileName: 'output', format: 'png', exportPath: '' },
+    defaults: {
+      exportPath: '',
+      imageCount: 1,
+      exportItems: [{ fileName: 'output', format: 'png' }],
+    },
   },
   preview: {
     type: 'preview',
@@ -137,7 +200,7 @@ export const NODE_TYPE_DEFINITIONS: Record<string, NodeTypeDefinition> = {
       { id: 'height', label: 'Height', type: 'number' },
     ],
     outputs: [{ id: 'image', label: 'Image', type: 'image' }],
-    defaults: { width: 512, height: 512, keepAspect: true },
+    defaults: { width: 512, height: 512, aspectLocked: true },
   },
   crop: {
     type: 'crop',
@@ -152,17 +215,6 @@ export const NODE_TYPE_DEFINITIONS: Record<string, NodeTypeDefinition> = {
     ],
     outputs: [{ id: 'image', label: 'Image', type: 'image' }],
     defaults: { x: 0, y: 0, width: 256, height: 256 },
-  },
-  setAlpha: {
-    type: 'setAlpha',
-    label: 'Set Alpha',
-    category: 'tool',
-    inputs: [
-      { id: 'image', label: 'Image', type: 'image' },
-      { id: 'alpha', label: 'Alpha', type: 'number' },
-    ],
-    outputs: [{ id: 'image', label: 'Image', type: 'image' }],
-    defaults: { alpha: 1.0 },
   },
   blur: {
     type: 'blur',
@@ -185,6 +237,103 @@ export const NODE_TYPE_DEFINITIONS: Record<string, NodeTypeDefinition> = {
     ],
     outputs: [{ id: 'image', label: 'Image', type: 'image' }],
     defaults: { angle: 0, flipH: false, flipV: false },
+  },
+  getChannel: {
+    type: 'getChannel',
+    label: 'Get Channel',
+    category: 'read',
+    inputs: [{ id: 'image', label: 'Image', type: 'image' }],
+    outputs: [
+      { id: 'alpha', label: 'Alpha', type: 'image' },
+      { id: 'red', label: 'Red', type: 'image' },
+      { id: 'green', label: 'Green', type: 'image' },
+      { id: 'blue', label: 'Blue', type: 'image' },
+    ],
+    defaults: {},
+  },
+  setMask: {
+    type: 'setMask',
+    label: 'Set Mask',
+    category: 'tool',
+    inputs: [
+      { id: 'image', label: 'Image', type: 'image' },
+      { id: 'mask', label: 'Mask', type: 'image' },
+    ],
+    outputs: [{ id: 'image', label: 'Image', type: 'image' }],
+    defaults: { invert: false },
+  },
+  keyColor: {
+    type: 'keyColor',
+    label: 'Key Color',
+    category: 'tool',
+    inputs: [{ id: 'image', label: 'Image', type: 'image' }],
+    outputs: [{ id: 'image', label: 'Image (RGBA)', type: 'image' }],
+    defaults: {
+      keyColor: '#00ff00',
+      threshold: 0.3,
+      softness: 0.15,
+      manualMaskData: '',
+      _keyColorBaked: '',
+    },
+  },
+  removeBg: {
+    type: 'removeBg',
+    label: 'Remove Background',
+    category: 'tool',
+    inputs: [{ id: 'image', label: 'Image', type: 'image' }],
+    outputs: [{ id: 'image', label: 'Image (RGBA)', type: 'image' }],
+    defaults: {
+      model: 'isnet-general-use',
+      alphaMatting: false,
+      fgThreshold: 240,
+      bgThreshold: 10,
+      erodeSize: 10,
+      threshold: 0,
+      feather: 0,
+      erode: 0,
+      dilate: 0,
+      invert: false,
+      bgFill: 'transparent',
+      _removeBgBaked: '',
+    },
+  },
+  simpleCombine: {
+    type: 'simpleCombine',
+    label: 'Simple Combine',
+    category: 'tool',
+    inputs: [
+      { id: 'image1', label: 'Image 1 (overlay)', type: 'image' },
+      { id: 'image2', label: 'Image 2 (base)', type: 'image' },
+    ],
+    outputs: [{ id: 'image', label: 'Image', type: 'image' }],
+    defaults: { opacity: 1.0 },
+  },
+  stackImages: {
+    type: 'stackImages',
+    label: 'Stack Images',
+    category: 'tool',
+    inputs: [
+      { id: 'image1', label: 'Image 1', type: 'image' },
+      { id: 'image2', label: 'Image 2', type: 'image' },
+    ],
+    outputs: [{ id: 'image', label: 'Image', type: 'image' }],
+    defaults: {
+      direction: 'horizontal',
+      stretch: false,
+      imageCount: 2,
+    },
+  },
+  divider: {
+    type: 'divider',
+    label: 'Divider',
+    category: 'tool',
+    inputs: [{ id: 'image', label: 'Image', type: 'image' }],
+    outputs: Array.from({ length: MAX_DIVIDER_OUTPUTS }, (_, i) => ({
+      id: `out${i + 1}`,
+      label: `Out ${i + 1}`,
+      type: 'image' as PortType,
+    })),
+    defaults: { selections: [], _dividerOutputs: {} },
   },
   numberValue: {
     type: 'numberValue',
@@ -251,7 +400,7 @@ export const NODE_TYPE_DEFINITIONS: Record<string, NodeTypeDefinition> = {
       { id: 'bgLayer', label: 'BG Layer', type: 'image' },
     ],
     outputs: [{ id: 'image', label: 'Image', type: 'image' }],
-    defaults: { layerCount: 0, layers: {} },
+    defaults: { layerCount: 0, layers: {}, bgHidden: false },
   },
   compositor: {
     type: 'compositor',
@@ -322,6 +471,11 @@ export const NODE_TYPE_DEFINITIONS: Record<string, NodeTypeDefinition> = {
     outputs: [{ id: 'image', label: 'Image', type: 'image' }],
     defaults: {
       apiKey: '',
+      // Optional overrides for OpenAI-compatible gateways (e.g. Playtika ML
+      // Model Gateway). Leave blank to use OPENAI_BASE_URL / OPENAI_IMAGE_MODEL
+      // from backend env, or fall back to api.openai.com + 'gpt-image-2'.
+      baseUrl: '',
+      modelName: '',
       prompt: '',
       imageSize: 'auto',
       quality: 'auto',
@@ -331,7 +485,51 @@ export const NODE_TYPE_DEFINITIONS: Record<string, NodeTypeDefinition> = {
       refImageCount: 1,
     },
   },
+  falAi: {
+    type: 'falAi',
+    label: 'FAL AI',
+    category: 'ai',
+    inputs: [
+      { id: 'prompt', label: 'Prompt', type: 'string' },
+      { id: 'referenceImage1', label: 'Image 1', type: 'image' },
+    ],
+    outputs: [{ id: 'image', label: 'Image', type: 'image' }],
+    defaults: {
+      apiKey: '',
+      prompt: '',
+      model: 'flux_dev',
+      imageSize: 'square_hd',
+      numInferenceSteps: 28,
+      seed: 0,
+      refImageCount: 1,
+    },
+  },
 };
+
+/** fal.ai models that accept reference image input(s). Keep in sync with backend FAL_MODELS image_input field. */
+export const FAL_IMG2IMG_MODELS: ReadonlySet<string> = new Set([
+  'flux_redux_dev',
+  'fast_sdxl',
+  'nano_banana_edit',
+  'nano_banana_pro',
+]);
+
+/** fal.ai models that accept multiple reference images (image_urls list). */
+export const FAL_MULTI_IMAGE_MODELS: ReadonlySet<string> = new Set([
+  'nano_banana_edit',
+  'nano_banana_pro',
+]);
+
+/** fal.ai models that use aspect_ratio strings (Nano Banana family) instead of image_size presets. */
+export const FAL_ASPECT_RATIO_MODELS: ReadonlySet<string> = new Set([
+  'nano_banana',
+  'nano_banana_pro',
+]);
+
+/** fal.ai models with no size control at all (edit endpoints derive size from input). */
+export const FAL_NO_SIZE_MODELS: ReadonlySet<string> = new Set([
+  'nano_banana_edit',
+]);
 
 /** OpenAI image edits — multiple reference files; capped for stability. */
 export const GPT_IMAGE_2_MAX_REFERENCE_IMAGES = 8;
@@ -370,6 +568,24 @@ export function getNodeInputs(type: string, data?: Record<string, any>): PortDef
     ];
   }
 
+  if (type === 'stackImages') {
+    const count = Math.max(1, Math.min(MAX_STACK_IMAGES, (data?.imageCount as number) || 2));
+    return Array.from({ length: count }, (_, i) => ({
+      id: `image${i + 1}`,
+      label: `Image ${i + 1}`,
+      type: 'image' as PortType,
+    }));
+  }
+
+  if (type === 'exportImage') {
+    const count = Math.max(1, Math.min(MAX_EXPORT_IMAGES, (data?.imageCount as number) || 1));
+    return Array.from({ length: count }, (_, i) => ({
+      id: `image${i + 1}`,
+      label: `Image ${i + 1}`,
+      type: 'image' as PortType,
+    }));
+  }
+
   if (type === 'nanoBananaPro' || type === 'nanoBanana2' || type === 'gptImage2') {
     const count = (data?.refImageCount as number) || 1;
     return [
@@ -382,7 +598,40 @@ export function getNodeInputs(type: string, data?: Record<string, any>): PortDef
     ];
   }
 
+  if (type === 'falAi') {
+    const model = (data?.model as string) || 'flux_dev';
+    const supportsRefImage = FAL_IMG2IMG_MODELS.has(model);
+    if (!supportsRefImage) {
+      return [{ id: 'prompt', label: 'Prompt', type: 'string' as PortType }];
+    }
+    const supportsMulti = FAL_MULTI_IMAGE_MODELS.has(model);
+    const requested = (data?.refImageCount as number) || 1;
+    const count = supportsMulti ? Math.max(1, requested) : 1;
+    return [
+      { id: 'prompt', label: 'Prompt', type: 'string' as PortType },
+      ...Array.from({ length: count }, (_, i) => ({
+        id: `referenceImage${i + 1}`,
+        label: `Image ${i + 1}`,
+        type: 'image' as PortType,
+      })),
+    ];
+  }
+
   return def.inputs;
+}
+
+export function getNodeOutputs(type: string, data?: Record<string, any>): PortDefinition[] {
+  const def = NODE_TYPE_DEFINITIONS[type];
+  if (!def) return [];
+
+  if (type === 'divider') {
+    const raw = data?.selections;
+    const count = Array.isArray(raw) ? raw.length : 0;
+    const clamped = Math.max(0, Math.min(MAX_DIVIDER_OUTPUTS, count));
+    return def.outputs.slice(0, clamped);
+  }
+
+  return def.outputs;
 }
 
 export function canConnect(sourceType: PortType, targetType: PortType): boolean {

@@ -1,38 +1,50 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  clearUserFalKey,
   clearUserGeminiKey,
   clearUserOpenAIKey,
+  getFalKeyStatus,
   getGeminiKeyStatus,
   getOpenAIKeyStatus,
+  setUserFalKey,
   setUserGeminiKey,
   setUserOpenAIKey,
 } from '../utils/api';
-import { useAuth } from '../auth/AuthContext';
 
 export default function SettingsPage() {
-  const { firebaseEnabled } = useAuth();
   const [geminiInput, setGeminiInput] = useState('');
   const [openaiInput, setOpenaiInput] = useState('');
+  const [falInput, setFalInput] = useState('');
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
   const [hasOpenAIKey, setHasOpenAIKey] = useState(false);
+  const [hasFalKey, setHasFalKey] = useState(false);
   const [loading, setLoading] = useState(true);
   const [geminiMessage, setGeminiMessage] = useState<string | null>(null);
   const [geminiError, setGeminiError] = useState<string | null>(null);
   const [openaiMessage, setOpenaiMessage] = useState<string | null>(null);
   const [openaiError, setOpenaiError] = useState<string | null>(null);
+  const [falMessage, setFalMessage] = useState<string | null>(null);
+  const [falError, setFalError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setGeminiError(null);
     setOpenaiError(null);
+    setFalError(null);
     try {
-      const [g, o] = await Promise.all([getGeminiKeyStatus(), getOpenAIKeyStatus()]);
+      const [g, o, f] = await Promise.all([
+        getGeminiKeyStatus(),
+        getOpenAIKeyStatus(),
+        getFalKeyStatus(),
+      ]);
       setHasGeminiKey(g.hasKey);
       setHasOpenAIKey(o.hasKey);
+      setHasFalKey(f.hasKey);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Could not load settings';
       setGeminiError(msg);
       setOpenaiError(msg);
+      setFalError(msg);
     } finally {
       setLoading(false);
     }
@@ -102,6 +114,36 @@ export default function SettingsPage() {
     }
   };
 
+  const saveFal = async () => {
+    setFalMessage(null);
+    setFalError(null);
+    const trimmed = falInput.trim();
+    if (!trimmed) {
+      setFalError('Paste your fal.ai API key first.');
+      return;
+    }
+    try {
+      await setUserFalKey(trimmed);
+      setFalInput('');
+      setFalMessage('API key saved. It is stored on the server and never shown again.');
+      await refresh();
+    } catch (e: unknown) {
+      setFalError(e instanceof Error ? e.message : 'Save failed');
+    }
+  };
+
+  const clearFal = async () => {
+    setFalMessage(null);
+    setFalError(null);
+    try {
+      await clearUserFalKey();
+      setFalMessage('Stored API key removed.');
+      await refresh();
+    } catch (e: unknown) {
+      setFalError(e instanceof Error ? e.message : 'Clear failed');
+    }
+  };
+
   return (
     <div className="settings-page">
       <h1 className="settings-title">Settings</h1>
@@ -119,20 +161,13 @@ export default function SettingsPage() {
 
         {loading ? (
           <p className="settings-muted">Loading…</p>
-        ) : !firebaseEnabled ? (
-          <p className="settings-muted">
-            Firebase Auth is not configured for this build. Set <code>VITE_FIREBASE_*</code> in{' '}
-            <code>frontend/.env.local</code> for sign-in and per-user keys. For local use, set{' '}
-            <code>GEMINI_API_KEY</code> in <code>backend/.env</code>
-            {hasGeminiKey ? ' (server reports a key is configured).' : '.'}
-          </p>
         ) : (
           <>
             <p className="settings-status">
               {hasGeminiKey ? (
-                <span className="settings-ok">A personal API key is saved for your account.</span>
+                <span className="settings-ok">A Gemini API key is saved.</span>
               ) : (
-                <span className="settings-warn">No personal key saved yet.</span>
+                <span className="settings-warn">No key saved yet.</span>
               )}
             </p>
             <label className="settings-label" htmlFor="gemini-key">
@@ -184,20 +219,13 @@ export default function SettingsPage() {
 
         {loading ? (
           <p className="settings-muted">Loading…</p>
-        ) : !firebaseEnabled ? (
-          <p className="settings-muted">
-            Firebase Auth is not configured for this build. Set <code>VITE_FIREBASE_*</code> in{' '}
-            <code>frontend/.env.local</code> for sign-in and per-user keys. For local use, set{' '}
-            <code>OPENAI_API_KEY</code> in <code>backend/.env</code>
-            {hasOpenAIKey ? ' (server reports a key is configured).' : '.'}
-          </p>
         ) : (
           <>
             <p className="settings-status">
               {hasOpenAIKey ? (
-                <span className="settings-ok">A personal OpenAI API key is saved for your account.</span>
+                <span className="settings-ok">An OpenAI API key is saved.</span>
               ) : (
-                <span className="settings-warn">No personal OpenAI key saved yet.</span>
+                <span className="settings-warn">No key saved yet.</span>
               )}
             </p>
             <label className="settings-label" htmlFor="openai-key">
@@ -227,6 +255,58 @@ export default function SettingsPage() {
 
         {openaiMessage && <p className="settings-success">{openaiMessage}</p>}
         {openaiError && <p className="settings-error">{openaiError}</p>}
+      </section>
+
+      <section className="settings-section">
+        <h2 className="settings-heading">fal.ai API key</h2>
+        <p className="settings-help">
+          The <strong>FAL AI</strong> node uses your personal key from{' '}
+          <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noreferrer">
+            fal.ai
+          </a>
+          . It runs FLUX, Stable Diffusion 3.5, SDXL and similar models. Keys are
+          kept on the server (not in the browser bundle). You can override per node
+          in the inspector if needed.
+        </p>
+
+        {loading ? (
+          <p className="settings-muted">Loading…</p>
+        ) : (
+          <>
+            <p className="settings-status">
+              {hasFalKey ? (
+                <span className="settings-ok">A fal.ai API key is saved.</span>
+              ) : (
+                <span className="settings-warn">No key saved yet.</span>
+              )}
+            </p>
+            <label className="settings-label" htmlFor="fal-key">
+              Paste API key
+            </label>
+            <input
+              id="fal-key"
+              type="password"
+              className="settings-input"
+              autoComplete="off"
+              placeholder="fal-…"
+              value={falInput}
+              onChange={(e) => setFalInput(e.target.value)}
+            />
+            <div className="settings-actions">
+              <button type="button" className="settings-btn settings-btn-primary" onClick={saveFal}>
+                Save key
+              </button>
+              {hasFalKey && (
+                <button type="button" className="settings-btn settings-btn-danger" onClick={clearFal}>
+                  Remove stored key
+                </button>
+              )}
+            </div>
+          </>
+        )}
+
+        {falMessage && <p className="settings-success">{falMessage}</p>}
+        {falError && <p className="settings-error">{falError}</p>}
       </section>
     </div>
   );

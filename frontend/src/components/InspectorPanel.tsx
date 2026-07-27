@@ -4,7 +4,16 @@ import {
   NODE_CATEGORIES,
   MAX_COMPOSITOR_LAYERS,
   MAX_VIGNETTE_LAYERS,
+  MAX_STACK_IMAGES,
+  MAX_EXPORT_IMAGES,
+  MAX_DIVIDER_OUTPUTS,
   GPT_IMAGE_2_MAX_REFERENCE_IMAGES,
+  FAL_IMG2IMG_MODELS,
+  FAL_MULTI_IMAGE_MODELS,
+  FAL_ASPECT_RATIO_MODELS,
+  FAL_NO_SIZE_MODELS,
+  isNodeTypePinnable,
+  isTemplateOutputNodeType,
 } from '../types/nodeTypes';
 import {
   REFMAPPER_ATTRIBUTES_ORDERED,
@@ -18,31 +27,46 @@ import {
   sketch2FinalLocalPrompt,
   type RefMapperEntry,
 } from '../constants/refMapperAttributes';
-import { useCallback, useRef, useMemo, useState } from 'react';
+import { useCallback, useEffect, useRef, useMemo, useState } from 'react';
+import { getConnectedImageDataUrl, getNodeImageOutputDataUrl } from '../utils/upstreamImage';
+import { exportImages } from '../utils/api';
+import { buildImportImageData } from '../utils/importImageData';
+import { remapDividerSourceEdges, type DividerSelection } from '../utils/dividerEdges';
 import CompositorModal from './CompositorModal';
 import CropModal from './CropModal';
+import DividerModal from './DividerModal';
 import EditorModal from './EditorModal';
+import KeyColorModal from './KeyColorModal';
+import RemoveBgModal from './RemoveBgModal';
 import StudioFields from './StudioFields';
 import VignetteModal from './VignetteModal';
 
 export default function InspectorPanel() {
-  const {
-    nodes,
-    selectedNodeId,
-    updateNodeData,
-    toggleBypass,
-    edges,
-    isRunning,
-    focusedGroupId,
-    groups,
-  } = useWorkflowStore();
+  // Subscribe granularly instead of pulling the whole store. The heavy inspector
+  // previously re-rendered on every store tick (every box-select / drag frame).
+  // `selectedNode` only changes reference when that specific node changes, so
+  // box-selecting other nodes no longer re-renders the inspector.
+  const selectedNode = useWorkflowStore(
+    (s) => s.nodes.find((n) => n.id === s.selectedNodeId) ?? null,
+  );
+  const updateNodeData = useWorkflowStore((s) => s.updateNodeData);
+  const toggleBypass = useWorkflowStore((s) => s.toggleBypass);
+  const togglePin = useWorkflowStore((s) => s.togglePin);
+  const edges = useWorkflowStore((s) => s.edges);
+  const isRunning = useWorkflowStore((s) => s.isRunning);
+  const focusedGroupId = useWorkflowStore((s) => s.focusedGroupId);
+  const groups = useWorkflowStore((s) => s.groups);
 
   const [compositorModalOpen, setCompositorModalOpen] = useState(false);
   const [editorModalOpen, setEditorModalOpen] = useState(false);
   const [vignetteModalOpen, setVignetteModalOpen] = useState(false);
+  const [keyColorModalOpen, setKeyColorModalOpen] = useState(false);
+  const [removeBgModalOpen, setRemoveBgModalOpen] = useState(false);
 
   const cropEditorModalNodeId = useWorkflowStore((s) => s.cropEditorModalNodeId);
   const closeCropEditorModal = useWorkflowStore((s) => s.closeCropEditorModal);
+  const dividerEditorModalNodeId = useWorkflowStore((s) => s.dividerEditorModalNodeId);
+  const closeDividerEditorModal = useWorkflowStore((s) => s.closeDividerEditorModal);
 
   const cropModalEl =
     cropEditorModalNodeId != null ? (
@@ -54,12 +78,21 @@ export default function InspectorPanel() {
       />
     ) : null;
 
-  const selectedNode = nodes.find((n) => n.id === selectedNodeId);
+  const dividerModalEl =
+    dividerEditorModalNodeId != null ? (
+      <DividerModal
+        key={dividerEditorModalNodeId}
+        open
+        nodeId={dividerEditorModalNodeId}
+        onClose={closeDividerEditorModal}
+      />
+    ) : null;
 
   if (!selectedNode) {
     return (
       <>
         {cropModalEl}
+        {dividerModalEl}
         <div className="inspector-panel">
           <div className="inspector-header">Inspector</div>
           <div className="inspector-empty">Select a node to inspect</div>
@@ -88,6 +121,7 @@ export default function InspectorPanel() {
   return (
     <>
       {cropModalEl}
+      {dividerModalEl}
       <div className={`inspector-panel ${isRunning ? 'inspector-locked' : ''}`}>
       <div
         className="inspector-header"
@@ -135,6 +169,25 @@ export default function InspectorPanel() {
         )}
       </div>
 
+      {isNodeTypePinnable(selectedNode.type) && (
+        <div className="inspector-section">
+          <label className="inspector-label">
+            <input
+              type="checkbox"
+              checked={Boolean(data.pinned)}
+              onChange={() => togglePin(selectedNode.id)}
+              disabled={isRunning}
+            />
+            Pin to template
+          </label>
+          <p className="inspector-focus-note">
+            {isTemplateOutputNodeType(selectedNode.type)
+              ? 'Pinned results appear in the Playground result panel.'
+              : 'Pinned inputs become fields in the Playground template form.'}
+          </p>
+        </div>
+      )}
+
       <div className="inspector-divider" />
 
       <div className="inspector-section">
@@ -154,6 +207,17 @@ export default function InspectorPanel() {
           openCropModal={
             selectedNode.type === 'crop'
               ? () => useWorkflowStore.getState().openCropEditorModal(selectedNode.id)
+              : undefined
+          }
+          openKeyColorModal={
+            selectedNode.type === 'keyColor' ? () => setKeyColorModalOpen(true) : undefined
+          }
+          openRemoveBgModal={
+            selectedNode.type === 'removeBg' ? () => setRemoveBgModalOpen(true) : undefined
+          }
+          openDividerModal={
+            selectedNode.type === 'divider'
+              ? () => useWorkflowStore.getState().openDividerEditorModal(selectedNode.id)
               : undefined
           }
         />
@@ -188,32 +252,8 @@ export default function InspectorPanel() {
         )}
       </div>
 
-      {selectedNode.type === 'preview' && !!data.previewData && (
-        <>
-          <div className="inspector-divider" />
-          <div className="inspector-section">
-            <div className="inspector-section-title">Preview</div>
-            <img
-              src={data.previewData as string}
-              alt="Preview"
-              className="inspector-preview-img"
-            />
-          </div>
-        </>
-      )}
-
-      {!!data._result && (
-        <>
-          <div className="inspector-divider" />
-          <div className="inspector-section">
-            <div className="inspector-section-title">Last Result</div>
-            <pre className="inspector-result">
-              {typeof data._result === 'string'
-                ? data._result
-                : JSON.stringify(data._result, null, 2)}
-            </pre>
-          </div>
-        </>
+      {selectedNode.type === 'preview' && (
+        <PreviewInspectorSection nodeId={selectedNode.id} data={data} />
       )}
 
       {selectedNode.type === 'compositor' && (
@@ -239,12 +279,28 @@ export default function InspectorPanel() {
           nodeId={selectedNode.id}
         />
       )}
+
+      {selectedNode.type === 'keyColor' && (
+        <KeyColorModal
+          open={keyColorModalOpen}
+          onClose={() => setKeyColorModalOpen(false)}
+          nodeId={selectedNode.id}
+        />
+      )}
+
+      {selectedNode.type === 'removeBg' && (
+        <RemoveBgModal
+          open={removeBgModalOpen}
+          onClose={() => setRemoveBgModalOpen(false)}
+          nodeId={selectedNode.id}
+        />
+      )}
     </div>
     </>
   );
 }
 
-function NodePropertyEditor({
+export function NodePropertyEditor({
   nodeId,
   type,
   data,
@@ -253,6 +309,9 @@ function NodePropertyEditor({
   openEditorModal,
   openVignetteModal,
   openCropModal,
+  openKeyColorModal,
+  openRemoveBgModal,
+  openDividerModal,
 }: {
   nodeId: string;
   type: string;
@@ -262,21 +321,29 @@ function NodePropertyEditor({
   openEditorModal?: () => void;
   openVignetteModal?: () => void;
   openCropModal?: () => void;
+  openKeyColorModal?: () => void;
+  openRemoveBgModal?: () => void;
+  openDividerModal?: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [importDragActive, setImportDragActive] = useState(false);
+
+  const handleImportFile = useCallback(
+    async (file: File) => {
+      if (!file.type.startsWith('image/')) return;
+      updateNodeData(nodeId, await buildImportImageData(file, file.name));
+    },
+    [nodeId, updateNodeData],
+  );
 
   const handleFileSelect = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        updateNodeData(nodeId, { fileData: dataUrl, filePath: file.name });
-      };
-      reader.readAsDataURL(file);
+      await handleImportFile(file);
+      e.target.value = '';
     },
-    [nodeId, updateNodeData]
+    [handleImportFile],
   );
 
   const update = (key: string, value: any) => updateNodeData(nodeId, { [key]: value });
@@ -296,6 +363,25 @@ function NodePropertyEditor({
         </div>
       );
 
+    case 'note':
+      return (
+        <div className="prop-group">
+          <div className="inspector-empty-small" style={{ lineHeight: 1.45, marginBottom: 8 }}>
+            Notes live on the canvas only — they don't connect to anything and
+            don't run in the workflow. Use them to leave reminders or context
+            for yourself or collaborators.
+          </div>
+          <label className="inspector-label">Note Text</label>
+          <textarea
+            className="inspector-textarea"
+            value={(data.value as string) || ''}
+            onChange={(e) => update('value', e.target.value)}
+            rows={6}
+            placeholder="Write a note..."
+          />
+        </div>
+      );
+
     case 'combinePrompts':
       return <CombinePromptsEditor nodeId={nodeId} data={data} updateNodeData={updateNodeData} />;
 
@@ -310,10 +396,36 @@ function NodePropertyEditor({
 
     case 'importImage':
       return (
-        <div className="prop-group">
-          <button className="inspector-btn" onClick={() => fileInputRef.current?.click()}>
+        <div
+          className={`prop-group inspector-import-drop${importDragActive ? ' inspector-import-drop-active' : ''}`}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setImportDragActive(true);
+          }}
+          onDragEnter={(e) => {
+            e.preventDefault();
+            setImportDragActive(true);
+          }}
+          onDragLeave={(e) => {
+            const rel = e.relatedTarget;
+            if (rel && e.currentTarget.contains(rel as Element)) return;
+            setImportDragActive(false);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            setImportDragActive(false);
+            const file = e.dataTransfer.files?.[0];
+            if (file) void handleImportFile(file);
+          }}
+        >
+          <button
+            type="button"
+            className="inspector-btn"
+            onClick={() => fileInputRef.current?.click()}
+          >
             Choose File
           </button>
+          <span className="inspector-import-drop-hint">or drop an image here</span>
           <input
             ref={fileInputRef}
             type="file"
@@ -322,76 +434,17 @@ function NodePropertyEditor({
             onChange={handleFileSelect}
           />
           {data.filePath && <div className="prop-file-name">{data.filePath as string}</div>}
+          <ImageSizeInfo src={getNodeImageOutputDataUrl(data) || null} />
         </div>
       );
 
     case 'exportImage':
       return (
-        <div className="prop-group">
-          <label className="inspector-label">Export Path (local)</label>
-          <input
-            className="inspector-input"
-            value={(data.exportPath as string) || ''}
-            onChange={(e) => update('exportPath', e.target.value)}
-            placeholder="D:\output\image.png"
-          />
-          {data.exportPath && (
-            <div className="prop-file-name" title={data.exportPath as string}>
-              {data.exportPath as string}
-            </div>
-          )}
-          <label className="inspector-label">File Name</label>
-          <input
-            className="inspector-input"
-            value={data.fileName as string}
-            onChange={(e) => update('fileName', e.target.value)}
-          />
-          <label className="inspector-label">Format</label>
-          <select
-            className="inspector-select"
-            value={data.format as string}
-            onChange={(e) => update('format', e.target.value)}
-          >
-            <option value="png">PNG</option>
-            <option value="jpg">JPG</option>
-            <option value="webp">WEBP</option>
-          </select>
-          {data._lastExportedPath && (
-            <div className="export-result-info">
-              <span className="export-result-check">Exported to:</span>
-              <span className="export-result-path">{data._lastExportedPath as string}</span>
-            </div>
-          )}
-        </div>
+        <ExportImagePropertyEditor nodeId={nodeId} data={data} updateNodeData={updateNodeData} />
       );
 
     case 'resize':
-      return (
-        <div className="prop-group">
-          <label className="inspector-label">Width</label>
-          <input
-            className="inspector-input"
-            type="number"
-            value={data.width as number}
-            onChange={(e) => update('width', parseInt(e.target.value) || 0)}
-          />
-          <label className="inspector-label">Height</label>
-          <input
-            className="inspector-input"
-            type="number"
-            value={data.height as number}
-            onChange={(e) => update('height', parseInt(e.target.value) || 0)}
-          />
-          <label className="inspector-label">
-            <input
-              type="checkbox"
-              checked={data.keepAspect as boolean}
-              onChange={(e) => update('keepAspect', e.target.checked)}
-            />
-            Keep Aspect Ratio
-          </label>
-        </div>
-      );
+      return <ResizePropertyEditor nodeId={nodeId} data={data} updateNodeData={updateNodeData} />;
 
     case 'crop':
       return (
@@ -403,21 +456,13 @@ function NodePropertyEditor({
         />
       );
 
-    case 'setAlpha':
+    case 'divider':
       return (
-        <div className="prop-group">
-          <label className="inspector-label">Alpha (0-1)</label>
-          <input
-            className="inspector-range"
-            type="range"
-            min={0}
-            max={1}
-            step={0.01}
-            value={data.alpha as number}
-            onChange={(e) => update('alpha', parseFloat(e.target.value))}
-          />
-          <span className="range-value">{(data.alpha as number).toFixed(2)}</span>
-        </div>
+        <DividerPropertyEditor
+          nodeId={nodeId}
+          data={data}
+          onOpenDivider={openDividerModal}
+        />
       );
 
     case 'blur':
@@ -468,6 +513,84 @@ function NodePropertyEditor({
           </label>
         </div>
       );
+
+    case 'getChannel':
+      return (
+        <div className="prop-group">
+          <div className="inspector-empty-small" style={{ lineHeight: 1.45 }}>
+            Splits the input image into four grayscale outputs — one per ARGB
+            channel. Each output renders that channel's intensity as a
+            grayscale image you can use directly or feed into <strong>Set Mask</strong>.
+          </div>
+        </div>
+      );
+
+    case 'setMask':
+      return (
+        <div className="prop-group">
+          <div className="inspector-empty-small" style={{ lineHeight: 1.45, marginBottom: 8 }}>
+            Uses the <strong>Mask</strong> input as a grayscale alpha for the
+            <strong> Image</strong> input. White = visible, black = transparent.
+            The mask is auto-resized to match the image.
+          </div>
+          <label className="inspector-label">
+            <input
+              type="checkbox"
+              checked={Boolean(data.invert)}
+              onChange={(e) => update('invert', e.target.checked)}
+            />
+            Invert mask
+          </label>
+        </div>
+      );
+
+    case 'keyColor':
+      return (
+        <KeyColorPropertyEditor
+          nodeId={nodeId}
+          data={data}
+          updateNodeData={updateNodeData}
+          onOpenKeyColor={openKeyColorModal}
+        />
+      );
+
+    case 'removeBg':
+      return (
+        <RemoveBgPropertyEditor
+          nodeId={nodeId}
+          data={data}
+          updateNodeData={updateNodeData}
+          onOpenRemoveBg={openRemoveBgModal}
+        />
+      );
+
+    case 'stackImages':
+      return (
+        <StackImagesPropertyEditor nodeId={nodeId} data={data} updateNodeData={updateNodeData} />
+      );
+
+    case 'simpleCombine': {
+      const opacity = typeof data.opacity === 'number' ? (data.opacity as number) : 1.0;
+      return (
+        <div className="prop-group">
+          <div className="inspector-empty-small" style={{ lineHeight: 1.45, marginBottom: 8 }}>
+            Image 1 (overlay) is composited on top of Image 2 (base). The
+            opacity slider fades Image 1. Image 1 is resized to match Image 2.
+          </div>
+          <label className="inspector-label">Opacity (0–1)</label>
+          <input
+            className="inspector-range"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={opacity}
+            onChange={(e) => update('opacity', parseFloat(e.target.value))}
+          />
+          <span className="range-value">{opacity.toFixed(2)}</span>
+        </div>
+      );
+    }
 
     case 'numberValue':
       return (
@@ -587,6 +710,11 @@ function NodePropertyEditor({
         <GptImage2Editor nodeId={nodeId} data={data} updateNodeData={updateNodeData} />
       );
 
+    case 'falAi':
+      return (
+        <FalAiEditor nodeId={nodeId} data={data} updateNodeData={updateNodeData} />
+      );
+
     case 'imageScfPrompt':
       return (
         <ImageScfPromptEditor nodeId={nodeId} data={data} updateNodeData={updateNodeData} />
@@ -598,6 +726,560 @@ function NodePropertyEditor({
     default:
       return <div className="inspector-empty-small">No editable properties</div>;
   }
+}
+
+function gcdInt(a: number, b: number): number {
+  let x = Math.abs(Math.round(a));
+  let y = Math.abs(Math.round(b));
+  while (y) {
+    [x, y] = [y, x % y];
+  }
+  return x || 1;
+}
+
+/** Inspector preview that mirrors the in-canvas Preview node: prefers the
+ * live upstream image so the size readout reflects the current resize
+ * (or other tool) result, and falls back to the cached `previewData`
+ * from the last run when the upstream is disconnected. */
+function PreviewInspectorSection({
+  nodeId,
+  data,
+}: {
+  nodeId: string;
+  data: Record<string, any>;
+}) {
+  const edges = useWorkflowStore((s) => s.edges);
+  const allNodes = useWorkflowStore((s) => s.nodes);
+  const liveSrc = useMemo(
+    () => getConnectedImageDataUrl(nodeId, 'image', edges, allNodes),
+    [nodeId, edges, allNodes],
+  );
+  const src = liveSrc || (data.previewData as string) || '';
+  if (!src) return null;
+  return (
+    <>
+      <div className="inspector-divider" />
+      <div className="inspector-section">
+        <div className="inspector-section-title">Preview</div>
+        <img src={src} alt="Preview" className="inspector-preview-img" />
+        <ImageSizeInfo src={src} />
+      </div>
+    </>
+  );
+}
+
+function ImageSizeInfo({ src }: { src: string | null | undefined }) {
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
+
+  useEffect(() => {
+    if (!src) {
+      setSize(null);
+      return;
+    }
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      setSize({ width: img.naturalWidth, height: img.naturalHeight });
+    };
+    img.onerror = () => {
+      if (cancelled) return;
+      setSize(null);
+    };
+    img.src = src;
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+
+  if (!src || !size || !size.width || !size.height) return null;
+
+  const g = gcdInt(size.width, size.height);
+  const ratio = `${Math.round(size.width / g)}:${Math.round(size.height / g)}`;
+
+  return (
+    <div className="inspector-size-result">
+      <div className="size-result-row">
+        <span className="size-result-label">Width</span>
+        <span className="size-result-value">{size.width}px</span>
+      </div>
+      <div className="size-result-row">
+        <span className="size-result-label">Height</span>
+        <span className="size-result-value">{size.height}px</span>
+      </div>
+      <div className="size-result-row">
+        <span className="size-result-label">Ratio</span>
+        <span className="size-result-value">{ratio}</span>
+      </div>
+      <div className="size-result-total">
+        {size.width} × {size.height} px
+      </div>
+    </div>
+  );
+}
+
+/** Mirror of resolveLockedRatio in BaseNode — see comment there for the
+ * reasoning (deriving the ratio from the live W/H drifts due to integer
+ * rounding, so we keep a stable `_lockedRatio` on node data instead). */
+function resolveResizeLockedRatio(data: Record<string, any>): number {
+  const stored = Number(data._lockedRatio);
+  if (Number.isFinite(stored) && stored > 0) return stored;
+  const ow = Number(data._origWidth) || 0;
+  const oh = Number(data._origHeight) || 0;
+  if (ow > 0 && oh > 0) return ow / oh;
+  const w = Number(data.width) || 0;
+  const h = Number(data.height) || 0;
+  if (w > 0 && h > 0) return w / h;
+  return 1;
+}
+
+/**
+ * Inspector controls for the Resize node. Mirrors the in-canvas UI but
+ * lays out everything vertically so the user can read the values clearly.
+ * The width/height edits and lock toggle stay in sync with the node body
+ * because both are bound to the same node data.
+ */
+function ResizePropertyEditor({
+  nodeId,
+  data,
+  updateNodeData,
+}: {
+  nodeId: string;
+  data: Record<string, any>;
+  updateNodeData: (id: string, data: Record<string, any>) => void;
+}) {
+  const edges = useWorkflowStore((s) => s.edges);
+  const allNodes = useWorkflowStore((s) => s.nodes);
+
+  const upstreamSrc = useMemo(
+    () => getConnectedImageDataUrl(nodeId, 'image', edges, allNodes),
+    [nodeId, edges, allNodes],
+  );
+
+  const aspectLocked = data.aspectLocked !== false;
+  const width = Math.max(0, Number(data.width) || 0);
+  const height = Math.max(0, Number(data.height) || 0);
+  const origW = Math.max(0, Number(data._origWidth) || 0);
+  const origH = Math.max(0, Number(data._origHeight) || 0);
+  const lockedRatio = resolveResizeLockedRatio(data);
+
+  const handleWidthChange = (newW: number) => {
+    const w = Math.max(1, Math.round(newW));
+    if (aspectLocked && lockedRatio > 0) {
+      const h = Math.max(1, Math.round(w / lockedRatio));
+      updateNodeData(nodeId, { width: w, height: h });
+    } else {
+      updateNodeData(nodeId, { width: w });
+    }
+  };
+
+  const handleHeightChange = (newH: number) => {
+    const h = Math.max(1, Math.round(newH));
+    if (aspectLocked && lockedRatio > 0) {
+      const w = Math.max(1, Math.round(h * lockedRatio));
+      updateNodeData(nodeId, { width: w, height: h });
+    } else {
+      updateNodeData(nodeId, { height: h });
+    }
+  };
+
+  const handleToggleLock = () => {
+    if (!aspectLocked && width > 0 && height > 0) {
+      updateNodeData(nodeId, {
+        aspectLocked: true,
+        _lockedRatio: width / height,
+      });
+    } else {
+      updateNodeData(nodeId, { aspectLocked: !aspectLocked });
+    }
+  };
+
+  return (
+    <div className="prop-group">
+      <div className="resize-orig-row inspector-resize-orig-row">
+        <span className="resize-orig-label">Original</span>
+        <span className="resize-orig-value">
+          {origW && origH
+            ? `${origW} × ${origH}`
+            : upstreamSrc
+              ? 'Reading…'
+              : 'Connect image'}
+        </span>
+      </div>
+      <label className="inspector-label">Width</label>
+      <input
+        className="inspector-input"
+        type="number"
+        min={1}
+        value={width || ''}
+        onChange={(e) => handleWidthChange(parseInt(e.target.value, 10) || 0)}
+      />
+      <label className="inspector-label">Height</label>
+      <input
+        className="inspector-input"
+        type="number"
+        min={1}
+        value={height || ''}
+        onChange={(e) => handleHeightChange(parseInt(e.target.value, 10) || 0)}
+      />
+      <button
+        type="button"
+        className={`inspector-btn-small${aspectLocked ? '' : ' ghost'}`}
+        title={aspectLocked ? 'Aspect ratio is locked' : 'Aspect ratio is free'}
+        aria-pressed={aspectLocked}
+        onClick={handleToggleLock}
+        style={{ marginTop: 8, width: '100%' }}
+      >
+        {aspectLocked ? '🔒 Aspect Locked' : '🔓 Aspect Free'}
+      </button>
+    </div>
+  );
+}
+
+function StackImagesPropertyEditor({
+  nodeId,
+  data,
+  updateNodeData,
+}: {
+  nodeId: string;
+  data: Record<string, any>;
+  updateNodeData: (id: string, data: Record<string, any>) => void;
+}) {
+  const edges = useWorkflowStore((s) => s.edges);
+  const removeEdgesByIds = useWorkflowStore((s) => s.removeEdgesByIds);
+  const isRunning = useWorkflowStore((s) => s.isRunning);
+
+  const direction = data.direction === 'vertical' ? 'vertical' : 'horizontal';
+  const stretch = Boolean(data.stretch);
+  const imageCount = Math.max(
+    1,
+    Math.min(MAX_STACK_IMAGES, (data.imageCount as number) || 2),
+  );
+
+  const handleAddImage = () => {
+    if (imageCount >= MAX_STACK_IMAGES) return;
+    updateNodeData(nodeId, { imageCount: imageCount + 1 });
+  };
+
+  const handleRemoveImage = () => {
+    if (imageCount <= 1) return;
+    const handleToRemove = `image${imageCount}`;
+    const edgesToRemove = edges
+      .filter((e) => e.target === nodeId && e.targetHandle === handleToRemove)
+      .map((e) => e.id);
+    if (edgesToRemove.length > 0) {
+      removeEdgesByIds(edgesToRemove);
+    }
+    updateNodeData(nodeId, { imageCount: imageCount - 1 });
+  };
+
+  return (
+    <div className="prop-group">
+      <div className="editor-bg-notice">
+        Joins multiple images next to each other. Image 1 decides the
+        cross-axis size; other images are center-aligned — or stretched to
+        match Image 1 exactly when <strong>Stretch</strong> is on.
+      </div>
+
+      <label className="inspector-label">Direction</label>
+      <div className="combine-input-controls" style={{ marginBottom: 8 }}>
+        <button
+          type="button"
+          className={`inspector-btn-small${direction === 'horizontal' ? '' : ' ghost'}`}
+          onClick={() => updateNodeData(nodeId, { direction: 'horizontal' })}
+          disabled={isRunning}
+        >
+          ↔ Horizontal
+        </button>
+        <button
+          type="button"
+          className={`inspector-btn-small${direction === 'vertical' ? '' : ' ghost'}`}
+          onClick={() => updateNodeData(nodeId, { direction: 'vertical' })}
+          disabled={isRunning}
+        >
+          ↕ Vertical
+        </button>
+      </div>
+
+      <label className="inspector-label">
+        <input
+          type="checkbox"
+          checked={stretch}
+          onChange={(e) => updateNodeData(nodeId, { stretch: e.target.checked })}
+          disabled={isRunning}
+        />
+        Stretch all images to Image 1's size
+      </label>
+
+      <label className="inspector-label" style={{ marginTop: 8 }}>
+        Image Inputs
+      </label>
+      <div className="combine-input-controls">
+        <span className="combine-input-count">
+          {imageCount} / {MAX_STACK_IMAGES} input{imageCount !== 1 ? 's' : ''}
+        </span>
+        <button
+          type="button"
+          className="inspector-btn-small"
+          onClick={handleAddImage}
+          disabled={isRunning || imageCount >= MAX_STACK_IMAGES}
+        >
+          + Add
+        </button>
+        <button
+          type="button"
+          className="inspector-btn-small danger"
+          onClick={handleRemoveImage}
+          disabled={isRunning || imageCount <= 1}
+        >
+          − Remove
+        </button>
+      </div>
+
+      <div className="inspector-empty-small" style={{ marginTop: 8, lineHeight: 1.45 }}>
+        Preview on the node updates live as you connect or change images. Run
+        the workflow to bake the stacked output for downstream nodes.
+      </div>
+    </div>
+  );
+}
+
+interface ExportImageItemSettings {
+  fileName: string;
+  format: string;
+}
+
+/** Build a per-input settings list of length `imageCount`, migrating the
+ * legacy single `fileName` / `format` fields onto the first slot. */
+function normalizeExportItems(data: Record<string, any>): ExportImageItemSettings[] {
+  const count = Math.max(1, Math.min(MAX_EXPORT_IMAGES, (data.imageCount as number) || 1));
+  const raw = Array.isArray(data.exportItems) ? data.exportItems : [];
+  const legacyName =
+    typeof data.fileName === 'string' && data.fileName.length > 0 ? data.fileName : '';
+  const legacyFmt =
+    typeof data.format === 'string' && data.format.length > 0 ? data.format : 'png';
+  return Array.from({ length: count }, (_, i) => {
+    const item = (raw[i] || {}) as Record<string, any>;
+    const fileName =
+      typeof item.fileName === 'string' && item.fileName.length > 0
+        ? item.fileName
+        : i === 0 && legacyName
+          ? legacyName
+          : `image${i + 1}`;
+    const format =
+      typeof item.format === 'string' && item.format.length > 0
+        ? item.format
+        : i === 0
+          ? legacyFmt
+          : 'png';
+    return { fileName, format };
+  });
+}
+
+/** Resolve the image feeding input slot `slot` (1-based). Falls back to the
+ * legacy `image` handle for the first slot so old workflows still work. */
+function getConnectedExportImage(
+  nodeId: string,
+  slot: number,
+  edges: { source: string; sourceHandle?: string | null; target: string; targetHandle?: string | null }[],
+  allNodes: { id: string; data?: Record<string, any> }[],
+): string | null {
+  const direct = getConnectedImageDataUrl(nodeId, `image${slot}`, edges, allNodes);
+  if (direct) return direct;
+  if (slot === 1) return getConnectedImageDataUrl(nodeId, 'image', edges, allNodes);
+  return null;
+}
+
+function ExportImagePropertyEditor({
+  nodeId,
+  data,
+  updateNodeData,
+}: {
+  nodeId: string;
+  data: Record<string, any>;
+  updateNodeData: (id: string, data: Record<string, any>) => void;
+}) {
+  const edges = useWorkflowStore((s) => s.edges);
+  const allNodes = useWorkflowStore((s) => s.nodes);
+  const removeEdgesByIds = useWorkflowStore((s) => s.removeEdgesByIds);
+  const isRunning = useWorkflowStore((s) => s.isRunning);
+
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const items = useMemo(() => normalizeExportItems(data), [data]);
+  const imageCount = items.length;
+  const exportPath = (data.exportPath as string) || '';
+
+  const connected = useMemo(
+    () => items.map((_, i) => getConnectedExportImage(nodeId, i + 1, edges, allNodes) != null),
+    [items, nodeId, edges, allNodes],
+  );
+  const connectedCount = connected.filter(Boolean).length;
+
+  const persistItems = (next: ExportImageItemSettings[], extra?: Record<string, any>) => {
+    updateNodeData(nodeId, {
+      exportItems: next,
+      fileName: undefined,
+      format: undefined,
+      ...extra,
+    });
+  };
+
+  const setItem = (index: number, patch: Partial<ExportImageItemSettings>) => {
+    persistItems(items.map((it, i) => (i === index ? { ...it, ...patch } : it)));
+  };
+
+  const handleAddImage = () => {
+    if (imageCount >= MAX_EXPORT_IMAGES) return;
+    persistItems([...items, { fileName: `image${imageCount + 1}`, format: 'png' }], {
+      imageCount: imageCount + 1,
+    });
+  };
+
+  const handleRemoveImage = () => {
+    if (imageCount <= 1) return;
+    const handleToRemove = `image${imageCount}`;
+    const edgesToRemove = edges
+      .filter((e) => e.target === nodeId && e.targetHandle === handleToRemove)
+      .map((e) => e.id);
+    if (edgesToRemove.length > 0) removeEdgesByIds(edgesToRemove);
+    persistItems(items.slice(0, imageCount - 1), { imageCount: imageCount - 1 });
+  };
+
+  const handleExport = async () => {
+    setExportError(null);
+    const payload: { image: string; fileName: string; format: string }[] = [];
+    for (let i = 0; i < imageCount; i++) {
+      const img = getConnectedExportImage(nodeId, i + 1, edges, allNodes);
+      if (!img) continue;
+      payload.push({ image: img, fileName: items[i].fileName, format: items[i].format });
+    }
+    if (payload.length === 0) {
+      setExportError('Connect at least one image, then export.');
+      return;
+    }
+    setExporting(true);
+    try {
+      const result = await exportImages(payload, exportPath);
+      updateNodeData(nodeId, { _lastExportedPaths: result.saved });
+      if (result.errors && result.errors.length > 0) {
+        setExportError(result.errors.join('\n'));
+      }
+    } catch (err: any) {
+      setExportError(err?.message || 'Export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const lastPaths: string[] = Array.isArray(data._lastExportedPaths)
+    ? (data._lastExportedPaths as string[])
+    : [];
+
+  return (
+    <div className="prop-group">
+      <div className="editor-bg-notice">
+        Connect one or more images, name each file and pick its format, then
+        click <strong>Export</strong>. Nothing is written until you press the
+        button.
+      </div>
+
+      <label className="inspector-label">Export Folder (local)</label>
+      <input
+        className="inspector-input"
+        value={exportPath}
+        onChange={(e) => updateNodeData(nodeId, { exportPath: e.target.value })}
+        placeholder="D:\output (blank = backend exports folder)"
+        disabled={isRunning}
+      />
+
+      <label className="inspector-label" style={{ marginTop: 10 }}>
+        Image Inputs
+      </label>
+      <div className="combine-input-controls">
+        <span className="combine-input-count">
+          {imageCount} / {MAX_EXPORT_IMAGES} input{imageCount !== 1 ? 's' : ''}
+        </span>
+        <button
+          type="button"
+          className="inspector-btn-small"
+          onClick={handleAddImage}
+          disabled={isRunning || exporting || imageCount >= MAX_EXPORT_IMAGES}
+        >
+          + Add image
+        </button>
+        <button
+          type="button"
+          className="inspector-btn-small danger"
+          onClick={handleRemoveImage}
+          disabled={isRunning || exporting || imageCount <= 1}
+        >
+          − Remove
+        </button>
+      </div>
+
+      {items.map((item, i) => (
+        <div key={i} className="editor-layer-card" style={{ marginTop: 8 }}>
+          <div className="editor-layer-card-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span>Image {i + 1}</span>
+            <span
+              className="inspector-connected-badge"
+              style={{ opacity: connected[i] ? 1 : 0.4 }}
+            >
+              {connected[i] ? 'connected' : 'no input'}
+            </span>
+          </div>
+          <label className="inspector-label">File name</label>
+          <input
+            className="inspector-input"
+            value={item.fileName}
+            onChange={(e) => setItem(i, { fileName: e.target.value })}
+            placeholder={`image${i + 1}`}
+            disabled={isRunning || exporting}
+          />
+          <label className="inspector-label">Format</label>
+          <select
+            className="inspector-select"
+            value={item.format}
+            onChange={(e) => setItem(i, { format: e.target.value })}
+            disabled={isRunning || exporting}
+          >
+            <option value="png">PNG</option>
+            <option value="jpg">JPG</option>
+            <option value="webp">WEBP</option>
+          </select>
+        </div>
+      ))}
+
+      <button
+        type="button"
+        className="inspector-btn"
+        style={{ marginTop: 12 }}
+        onClick={handleExport}
+        disabled={isRunning || exporting || connectedCount === 0}
+      >
+        {exporting ? 'Exporting…' : `Export ${connectedCount} image${connectedCount !== 1 ? 's' : ''}`}
+      </button>
+
+      {exportError && (
+        <div className="inspector-empty-small" style={{ marginTop: 8, color: '#f87171', whiteSpace: 'pre-wrap' }}>
+          {exportError}
+        </div>
+      )}
+
+      {lastPaths.length > 0 && (
+        <div className="export-result-info" style={{ marginTop: 10 }}>
+          <span className="export-result-check">Last export:</span>
+          {lastPaths.map((p, i) => (
+            <span key={i} className="export-result-path" title={p}>
+              {p}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function VignetteInspectorSummary({
@@ -682,6 +1364,356 @@ function CropPropertyEditor({
           />
         </div>
       ))}
+    </div>
+  );
+}
+
+function DividerPropertyEditor({
+  nodeId,
+  data,
+  onOpenDivider,
+}: {
+  nodeId: string;
+  data: Record<string, any>;
+  onOpenDivider?: () => void;
+}) {
+  const isRunning = useWorkflowStore((s) => s.isRunning);
+  const edges = useWorkflowStore((s) => s.edges);
+  const updateNodeData = useWorkflowStore((s) => s.updateNodeData);
+
+  const selections = (Array.isArray(data.selections) ? data.selections : []) as DividerSelection[];
+
+  const handleClearAll = useCallback(() => {
+    if (selections.length === 0) return;
+    const newEdges = remapDividerSourceEdges(nodeId, selections, [], edges);
+    useWorkflowStore.setState({ edges: newEdges, _dirty: true });
+    updateNodeData(nodeId, { selections: [], _dividerOutputs: {} });
+  }, [edges, nodeId, selections, updateNodeData]);
+
+  return (
+    <div className="prop-group">
+      <div className="editor-bg-notice">
+        Connect an image, then open the editor to draw box or lasso regions. Each region becomes one
+        output (max {MAX_DIVIDER_OUTPUTS}). Run the workflow to bake full-resolution crops.
+      </div>
+      <button
+        type="button"
+        className="inspector-btn"
+        disabled={isRunning || !onOpenDivider}
+        onClick={() => onOpenDivider?.()}
+      >
+        Open Divider
+      </button>
+      <div className="inspector-empty-small" style={{ marginTop: 10 }}>
+        {selections.length} selection{selections.length !== 1 ? 's' : ''}
+        {selections.length > 0 && (
+          <ul style={{ margin: '8px 0 0', paddingLeft: 18, lineHeight: 1.5 }}>
+            {selections.map((sel, i) => (
+              <li key={sel.id || `div-${i}`}>{`Out ${i + 1} — ${sel.kind}`}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <button
+        type="button"
+        className="inspector-btn"
+        style={{ marginTop: 10 }}
+        disabled={isRunning || selections.length === 0}
+        onClick={handleClearAll}
+      >
+        Clear all
+      </button>
+    </div>
+  );
+}
+
+function KeyColorPropertyEditor({
+  nodeId,
+  data,
+  updateNodeData,
+  onOpenKeyColor,
+}: {
+  nodeId: string;
+  data: Record<string, any>;
+  updateNodeData: (id: string, data: Record<string, any>) => void;
+  onOpenKeyColor?: () => void;
+}) {
+  const isRunning = useWorkflowStore((s) => s.isRunning);
+
+  const keyColor = (data.keyColor as string) || '#00ff00';
+  const hasBaked = Boolean((data._keyColorBaked as string) || '');
+
+  return (
+    <div className="prop-group">
+      <div className="inspector-empty-small" style={{ lineHeight: 1.45, marginBottom: 10 }}>
+        Open the editor to pick a colour, tune threshold / softness, and
+        brush manual fixes. Click <strong>Apply</strong> in the editor to
+        bake the keyed image into this node's output.
+      </div>
+
+      <div className="editor-field-row" style={{ gap: 8, marginBottom: 10, alignItems: 'center' }}>
+        <span
+          aria-hidden
+          style={{
+            display: 'inline-block',
+            width: 18,
+            height: 18,
+            borderRadius: 4,
+            border: '1px solid rgba(255,255,255,0.35)',
+            background: keyColor,
+            flexShrink: 0,
+          }}
+        />
+        <span style={{ fontFamily: 'monospace', opacity: 0.85 }}>{keyColor}</span>
+      </div>
+
+      <button
+        type="button"
+        className="inspector-btn"
+        onClick={() => onOpenKeyColor?.()}
+        disabled={isRunning || !onOpenKeyColor}
+      >
+        Open Editor…
+      </button>
+
+      {hasBaked ? (
+        <button
+          type="button"
+          className="inspector-btn"
+          style={{ marginTop: 6 }}
+          onClick={() =>
+            updateNodeData(nodeId, { _keyColorBaked: '', manualMaskData: '' })
+          }
+          disabled={isRunning}
+        >
+          Clear baked output
+        </button>
+      ) : null}
+
+      <div
+        className="inspector-empty-small"
+        style={{ marginTop: 10, opacity: 0.75 }}
+      >
+        {hasBaked
+          ? 'Output: baked from editor ✓'
+          : 'Output: passes the input image through until you bake.'}
+      </div>
+    </div>
+  );
+}
+
+const REMOVE_BG_MODELS = [
+  'u2net',
+  'u2net_human_seg',
+  'isnet-general-use',
+  'birefnet-general',
+  'birefnet-portrait',
+] as const;
+
+function RemoveBgPropertyEditor({
+  nodeId,
+  data,
+  updateNodeData,
+  onOpenRemoveBg,
+}: {
+  nodeId: string;
+  data: Record<string, any>;
+  updateNodeData: (id: string, data: Record<string, any>) => void;
+  onOpenRemoveBg?: () => void;
+}) {
+  const isRunning = useWorkflowStore((s) => s.isRunning);
+
+  const model = typeof data.model === 'string' && data.model ? data.model : 'isnet-general-use';
+  const alphaMatting = Boolean(data.alphaMatting);
+  const fgThreshold = Math.max(0, Math.min(255, Number(data.fgThreshold) || 240));
+  const bgThreshold = Math.max(0, Math.min(255, Number(data.bgThreshold) || 10));
+  const erodeSize = Math.max(0, Math.min(40, Number(data.erodeSize) || 10));
+  const threshold = Math.max(0, Math.min(255, Number(data.threshold) || 0));
+  const feather = Math.max(0, Math.min(20, Number(data.feather) || 0));
+  const erode = Math.max(0, Math.min(20, Number(data.erode) || 0));
+  const dilate = Math.max(0, Math.min(20, Number(data.dilate) || 0));
+  const invert = Boolean(data.invert);
+  const bgFillRaw = typeof data.bgFill === 'string' ? data.bgFill : 'transparent';
+  const bgTransparent = bgFillRaw === 'transparent' || !bgFillRaw;
+  const bgColor = bgTransparent ? '#ffffff' : bgFillRaw;
+  const hasBaked = Boolean((data._removeBgBaked as string) || '');
+
+  const update = (patch: Record<string, any>) => updateNodeData(nodeId, patch);
+
+  return (
+    <div className="prop-group">
+      <div className="inspector-empty-small" style={{ lineHeight: 1.45, marginBottom: 10 }}>
+        Remove background with a local model, then refine edges with mask sliders.
+        Use the editor for a larger live preview while tuning.
+      </div>
+
+      <label className="inspector-label">Model</label>
+      <select
+        className="inspector-select"
+        value={model}
+        onChange={(e) => update({ model: e.target.value })}
+        disabled={isRunning}
+      >
+        {REMOVE_BG_MODELS.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </select>
+
+      <label className="inspector-label" style={{ marginTop: 8 }}>
+        <input
+          type="checkbox"
+          checked={alphaMatting}
+          onChange={(e) => update({ alphaMatting: e.target.checked })}
+          disabled={isRunning}
+        />
+        Alpha matting (cleaner hair/fur, slower)
+      </label>
+
+      {alphaMatting ? (
+        <>
+          <label className="inspector-label">Foreground Threshold</label>
+          <input
+            className="inspector-range"
+            type="range"
+            min={0}
+            max={255}
+            value={fgThreshold}
+            onChange={(e) => update({ fgThreshold: Number(e.target.value) })}
+            disabled={isRunning}
+          />
+          <span className="range-value">{fgThreshold}</span>
+
+          <label className="inspector-label">Background Threshold</label>
+          <input
+            className="inspector-range"
+            type="range"
+            min={0}
+            max={255}
+            value={bgThreshold}
+            onChange={(e) => update({ bgThreshold: Number(e.target.value) })}
+            disabled={isRunning}
+          />
+          <span className="range-value">{bgThreshold}</span>
+
+          <label className="inspector-label">Alpha Erode Size</label>
+          <input
+            className="inspector-range"
+            type="range"
+            min={0}
+            max={40}
+            value={erodeSize}
+            onChange={(e) => update({ erodeSize: Number(e.target.value) })}
+            disabled={isRunning}
+          />
+          <span className="range-value">{erodeSize}</span>
+        </>
+      ) : null}
+
+      <label className="inspector-label">Threshold</label>
+      <input
+        className="inspector-range"
+        type="range"
+        min={0}
+        max={255}
+        value={threshold}
+        onChange={(e) => update({ threshold: Number(e.target.value) })}
+        disabled={isRunning}
+      />
+      <span className="range-value">{threshold}</span>
+
+      <label className="inspector-label">Feather</label>
+      <input
+        className="inspector-range"
+        type="range"
+        min={0}
+        max={20}
+        step={0.1}
+        value={feather}
+        onChange={(e) => update({ feather: Number(e.target.value) })}
+        disabled={isRunning}
+      />
+      <span className="range-value">{feather.toFixed(1)} px</span>
+
+      <label className="inspector-label">Erode</label>
+      <input
+        className="inspector-range"
+        type="range"
+        min={0}
+        max={20}
+        value={erode}
+        onChange={(e) => update({ erode: Number(e.target.value) })}
+        disabled={isRunning}
+      />
+      <span className="range-value">{erode}</span>
+
+      <label className="inspector-label">Dilate</label>
+      <input
+        className="inspector-range"
+        type="range"
+        min={0}
+        max={20}
+        value={dilate}
+        onChange={(e) => update({ dilate: Number(e.target.value) })}
+        disabled={isRunning}
+      />
+      <span className="range-value">{dilate}</span>
+
+      <label className="inspector-label">
+        <input
+          type="checkbox"
+          checked={invert}
+          onChange={(e) => update({ invert: e.target.checked })}
+          disabled={isRunning}
+        />
+        Invert mask
+      </label>
+
+      <label className="inspector-label">Background Fill</label>
+      <select
+        className="inspector-select"
+        value={bgTransparent ? 'transparent' : 'color'}
+        onChange={(e) => {
+          if (e.target.value === 'transparent') update({ bgFill: 'transparent' });
+          else update({ bgFill: bgColor });
+        }}
+        disabled={isRunning}
+      >
+        <option value="transparent">Transparent</option>
+        <option value="color">Solid color</option>
+      </select>
+      {!bgTransparent ? (
+        <input
+          className="inspector-color"
+          type="color"
+          value={bgColor}
+          onChange={(e) => update({ bgFill: e.target.value })}
+          disabled={isRunning}
+        />
+      ) : null}
+
+      <button
+        type="button"
+        className="inspector-btn"
+        style={{ marginTop: 10 }}
+        onClick={() => onOpenRemoveBg?.()}
+        disabled={isRunning || !onOpenRemoveBg}
+      >
+        Open Editor…
+      </button>
+
+      {hasBaked ? (
+        <button
+          type="button"
+          className="inspector-btn"
+          style={{ marginTop: 6 }}
+          onClick={() => updateNodeData(nodeId, { _removeBgBaked: '' })}
+          disabled={isRunning}
+        >
+          Clear baked output
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -1584,6 +2616,265 @@ function GptImage2Editor({
   );
 }
 
+const FAL_MODEL_OPTIONS: { id: string; label: string }[] = [
+  { id: 'flux_dev', label: 'FLUX.1 [dev]' },
+  { id: 'flux_schnell', label: 'FLUX.1 [schnell] (fast)' },
+  { id: 'flux_pro_v11', label: 'FLUX1.1 [pro]' },
+  { id: 'flux_redux_dev', label: 'FLUX.1 [dev] Redux (image-to-image)' },
+  { id: 'sd35_large', label: 'Stable Diffusion 3.5 Large' },
+  { id: 'fast_sdxl', label: 'Fast SDXL' },
+  { id: 'nano_banana', label: 'Nano Banana (Gemini 2.5 Flash Image)' },
+  { id: 'nano_banana_edit', label: 'Nano Banana Edit (image-to-image)' },
+  { id: 'nano_banana_pro', label: 'Nano Banana Pro (Gemini 3 Pro Image)' },
+];
+
+const FAL_IMAGE_SIZE_OPTIONS: { id: string; label: string }[] = [
+  { id: 'square_hd', label: 'Square HD (1024×1024)' },
+  { id: 'square', label: 'Square (512×512)' },
+  { id: 'portrait_4_3', label: 'Portrait 4:3' },
+  { id: 'portrait_16_9', label: 'Portrait 16:9' },
+  { id: 'landscape_4_3', label: 'Landscape 4:3' },
+  { id: 'landscape_16_9', label: 'Landscape 16:9' },
+];
+
+const FAL_ASPECT_RATIO_OPTIONS: { id: string; label: string }[] = [
+  { id: '1:1', label: '1:1' },
+  { id: '4:3', label: '4:3' },
+  { id: '3:4', label: '3:4' },
+  { id: '3:2', label: '3:2' },
+  { id: '2:3', label: '2:3' },
+  { id: '16:9', label: '16:9' },
+  { id: '9:16', label: '9:16' },
+  { id: '21:9', label: '21:9' },
+];
+
+function FalAiEditor({
+  nodeId,
+  data,
+  updateNodeData,
+}: {
+  nodeId: string;
+  data: Record<string, any>;
+  updateNodeData: (id: string, data: Record<string, any>) => void;
+}) {
+  const edges = useWorkflowStore((s) => s.edges);
+  const removeEdgesByIds = useWorkflowStore((s) => s.removeEdgesByIds);
+
+  const model = (data.model as string) || 'flux_dev';
+  const supportsRefImage = FAL_IMG2IMG_MODELS.has(model);
+  const supportsMultiImage = FAL_MULTI_IMAGE_MODELS.has(model);
+  const usesAspectRatio = FAL_ASPECT_RATIO_MODELS.has(model);
+  const noSizeControl = FAL_NO_SIZE_MODELS.has(model);
+  const supportsInferenceSteps = !usesAspectRatio && !noSizeControl;
+  const refImageCount = (data.refImageCount as number) || 1;
+
+  const promptEdge = useMemo(
+    () => edges.find((e) => e.target === nodeId && e.targetHandle === 'prompt'),
+    [edges, nodeId],
+  );
+
+  // Resolve the upstream prompt inside the selector so this re-renders only when
+  // the resolved string changes — not on every nodes-array rebuild (box-select).
+  const connectedPrompt = useWorkflowStore((s) => {
+    const edge = s.edges.find((e) => e.target === nodeId && e.targetHandle === 'prompt');
+    if (!edge) return null;
+    return resolveUpstreamTextOutput(edge.source, s.edges, s.nodes).trim();
+  });
+
+  const isPromptConnected = promptEdge != null;
+
+  const update = (key: string, value: any) => updateNodeData(nodeId, { [key]: value });
+
+  const handleModelChange = (next: string) => {
+    if (next === model) return;
+    if (!FAL_IMG2IMG_MODELS.has(next)) {
+      const refEdges = edges
+        .filter(
+          (e) =>
+            e.target === nodeId &&
+            typeof e.targetHandle === 'string' &&
+            e.targetHandle.startsWith('referenceImage'),
+        )
+        .map((e) => e.id);
+      if (refEdges.length > 0) {
+        removeEdgesByIds(refEdges);
+      }
+    }
+    update('model', next);
+  };
+
+  const handleAddImage = () => update('refImageCount', refImageCount + 1);
+
+  const handleRemoveImage = () => {
+    if (refImageCount <= 1) return;
+    const handleToRemove = `referenceImage${refImageCount}`;
+    const edgesToRemove = edges
+      .filter((e) => e.target === nodeId && e.targetHandle === handleToRemove)
+      .map((e) => e.id);
+    if (edgesToRemove.length > 0) {
+      removeEdgesByIds(edgesToRemove);
+    }
+    update('refImageCount', refImageCount - 1);
+  };
+
+  const imageSize = FAL_IMAGE_SIZE_OPTIONS.some((o) => o.id === data.imageSize)
+    ? (data.imageSize as string)
+    : 'square_hd';
+  const aspectRatio = FAL_ASPECT_RATIO_OPTIONS.some((o) => o.id === data.aspectRatio)
+    ? (data.aspectRatio as string)
+    : '1:1';
+  const steps = Number(data.numInferenceSteps) || 28;
+
+  return (
+    <div className="prop-group">
+      <div
+        className="inspector-empty-small"
+        style={{ opacity: 0.75, marginBottom: 8, fontFamily: 'ui-monospace, monospace' }}
+      >
+        fal.ai
+      </div>
+
+      <label className="inspector-label">Model</label>
+      <select
+        className="inspector-select"
+        value={model}
+        onChange={(e) => handleModelChange(e.target.value)}
+      >
+        {FAL_MODEL_OPTIONS.map((opt) => (
+          <option key={opt.id} value={opt.id}>
+            {opt.label}
+          </option>
+        ))}
+      </select>
+
+      <label className="inspector-label">
+        Prompt
+        {isPromptConnected && <span className="inspector-connected-badge">connected</span>}
+      </label>
+      {isPromptConnected ? (
+        <div className="inspector-connected-prompt">
+          <div className="connected-prompt-text">
+            {connectedPrompt && connectedPrompt.length > 0
+              ? connectedPrompt
+              : '(empty from source — check upstream text nodes)'}
+          </div>
+          <div className="connected-prompt-hint">
+            Prompt is driven by connected node. Disconnect to edit manually.
+          </div>
+        </div>
+      ) : (
+        <textarea
+          className="inspector-textarea"
+          value={(data.prompt as string) || ''}
+          onChange={(e) => update('prompt', e.target.value)}
+          rows={3}
+          placeholder="Describe the image you want to generate..."
+        />
+      )}
+
+      {supportsRefImage ? (
+        <>
+          <label className="inspector-label">Reference Images</label>
+          <div className="combine-input-controls">
+            <span className="combine-input-count">
+              {refImageCount} image input{refImageCount > 1 ? 's' : ''}
+            </span>
+            <button
+              type="button"
+              className="inspector-btn-small"
+              onClick={handleAddImage}
+              disabled={!supportsMultiImage && refImageCount >= 1}
+            >
+              + Add
+            </button>
+            <button
+              type="button"
+              className="inspector-btn-small danger"
+              onClick={handleRemoveImage}
+              disabled={refImageCount <= 1}
+            >
+              − Remove
+            </button>
+          </div>
+          <div className="inspector-empty-small" style={{ marginTop: 6, opacity: 0.75 }}>
+            {supportsMultiImage
+              ? 'All connected reference images are sent to fal as image_urls.'
+              : 'Only the first reference image is sent to fal as image_url.'}
+          </div>
+        </>
+      ) : (
+        <div className="inspector-empty-small" style={{ marginTop: 6, opacity: 0.75 }}>
+          This model is text-to-image only. Switch to <strong>Nano Banana Edit</strong>,
+          <strong> Nano Banana Pro</strong>, <strong>FLUX Redux</strong>, or
+          <strong> Fast SDXL</strong> to enable an image input port on the node.
+        </div>
+      )}
+
+      {!noSizeControl && !usesAspectRatio && (
+        <>
+          <label className="inspector-label">Image size</label>
+          <select
+            className="inspector-select"
+            value={imageSize}
+            onChange={(e) => update('imageSize', e.target.value)}
+          >
+            {FAL_IMAGE_SIZE_OPTIONS.map((opt) => (
+              <option key={opt.id} value={opt.id}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+
+      {usesAspectRatio && (
+        <>
+          <label className="inspector-label">Aspect Ratio</label>
+          <select
+            className="inspector-select"
+            value={aspectRatio}
+            onChange={(e) => update('aspectRatio', e.target.value)}
+          >
+            {FAL_ASPECT_RATIO_OPTIONS.map((opt) => (
+              <option key={opt.id} value={opt.id}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+
+      {supportsInferenceSteps && (
+        <>
+          <label className="inspector-label">Inference steps (1–50)</label>
+          <input
+            className="inspector-input"
+            type="number"
+            min={1}
+            max={50}
+            value={steps}
+            onChange={(e) =>
+              update(
+                'numInferenceSteps',
+                Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 28)),
+              )
+            }
+          />
+        </>
+      )}
+
+      <label className="inspector-label">Seed (0 = random)</label>
+      <input
+        className="inspector-input"
+        type="number"
+        min={0}
+        value={(data.seed as number) || 0}
+        onChange={(e) => update('seed', parseInt(e.target.value, 10) || 0)}
+      />
+    </div>
+  );
+}
+
 function ImageScfPromptEditor({
   nodeId,
   data,
@@ -1652,11 +2943,12 @@ function EditorPropertyEditor({
   const isRunning = useWorkflowStore((s) => s.isRunning);
   const layerCount = (data.layerCount as number) || 0;
   const layers = (data.layers as Record<string, any>) || {};
+  const bgHidden = Boolean(data.bgHidden);
 
   const handleAddLayer = () => {
     const newCount = layerCount + 1;
     const updated = { ...layers };
-    updated[`layer${newCount}`] = { x: 0, y: 0, width: 0, height: 0, rotation: 0, flipH: false };
+    updated[`layer${newCount}`] = { x: 0, y: 0, width: 0, height: 0, rotation: 0, flipH: false, hidden: false };
     updateNodeData(nodeId, { layerCount: newCount, layers: updated });
   };
 
@@ -1679,6 +2971,19 @@ function EditorPropertyEditor({
       <div className="editor-bg-notice">
         BG Layer is the bottom layer and is not editable — it sets the canvas size. Arrange layers in the editor
         window.
+      </div>
+
+      <div className="editor-layer-card" style={{ marginBottom: 10 }}>
+        <div className="editor-layer-card-header">BG Layer</div>
+        <label className="inspector-label" style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={!bgHidden}
+            disabled={isRunning}
+            onChange={(e) => updateNodeData(nodeId, { bgHidden: !e.target.checked })}
+          />
+          Show in output
+        </label>
       </div>
 
       <label className="inspector-label">Layers</label>

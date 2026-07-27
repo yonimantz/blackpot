@@ -6,12 +6,25 @@ import os
 import httpx
 from PIL import Image
 
+# When SSL_VERIFY=false is set in the environment (e.g. corporate proxy with self-signed cert),
+# skip TLS verification for all outbound API calls.
+_SSL_VERIFY = os.getenv('SSL_VERIFY', 'true').strip().lower() not in ('false', '0', 'no')
+if not _SSL_VERIFY:
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context  # noqa: SLF001
+
 try:
     from google import genai
     from google.genai import types
     _HAS_GENAI = True
 except ImportError:
     _HAS_GENAI = False
+
+try:
+    import fal_client
+    _HAS_FAL = True
+except ImportError:
+    _HAS_FAL = False
 
 NANO_MODEL = 'gemini-3-pro-image-preview'
 NANO2_MODEL = 'gemini-3.1-flash-image-preview'
@@ -88,6 +101,21 @@ def resolve_openai_api_key(data: dict) -> str:
     except Exception:
         pass
     return os.getenv('OPENAI_API_KEY', '').strip()
+
+
+def resolve_fal_api_key(data: dict) -> str:
+    """Per-node apiKey overrides user key from run context, then FAL_KEY env."""
+    node_key = (data.get('apiKey', '') or '').strip()
+    if node_key:
+        return node_key
+    try:
+        from request_context import get_run_context
+        ctx = get_run_context()
+        if ctx and ctx.fal_user_key and str(ctx.fal_user_key).strip():
+            return str(ctx.fal_user_key).strip()
+    except Exception:
+        pass
+    return os.getenv('FAL_KEY', '').strip()
 
 
 # Documented popular `size` values for gpt-image-2 (OpenAI image generation guide).
@@ -721,7 +749,7 @@ async def _execute_gpt_image_2(data: dict, inputs: dict) -> dict:
     headers_auth = {'Authorization': f'Bearer {api_key}'}
 
     try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=180.0, verify=_SSL_VERIFY) as client:
             if ref_files:
                 edits_size = _gpt_image_2_edits_size(size)
                 form_data: dict[str, str] = {
@@ -799,6 +827,249 @@ async def _execute_gpt_image_2(data: dict, inputs: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# fal.ai  —  FLUX / Stable Diffusion / SDXL via fal-client SDK
+# ---------------------------------------------------------------------------
+
+# Registry of supported fal models. Each entry maps a node-type-friendly key
+# to a fal endpoint slug plus the parameter shape we should send.
+#   size_param:  'image_size' (FLUX/SD enum) | 'aspect_ratio' (Nano Banana) | None
+#   image_input: 'single' (image_url) | 'multi' (image_urls list) | None
+FAL_MODELS: dict[str, dict] = {
+    'flux_dev': {
+        'endpoint': 'fal-ai/flux/dev',
+        'size_param': 'image_size',
+        'image_input': None,
+    },
+    'flux_schnell': {
+        'endpoint': 'fal-ai/flux/schnell',
+        'size_param': 'image_size',
+        'image_input': None,
+    },
+    'flux_pro_v11': {
+        'endpoint': 'fal-ai/flux-pro/v1.1',
+        'size_param': 'image_size',
+        'image_input': None,
+    },
+    'flux_redux_dev': {
+        'endpoint': 'fal-ai/flux/dev/redux',
+        'size_param': 'image_size',
+        'image_input': 'single',
+    },
+    'sd35_large': {
+        'endpoint': 'fal-ai/stable-diffusion-v35-large',
+        'size_param': 'image_size',
+        'image_input': None,
+    },
+    'fast_sdxl': {
+        'endpoint': 'fal-ai/fast-sdxl',
+        'size_param': 'image_size',
+        'image_input': 'single',
+    },
+    'nano_banana': {
+        'endpoint': 'fal-ai/nano-banana',
+        'size_param': 'aspect_ratio',
+        'image_input': None,
+    },
+    'nano_banana_edit': {
+        'endpoint': 'fal-ai/nano-banana/edit',
+        'size_param': None,
+        'image_input': 'multi',
+    },
+    'nano_banana_pro': {
+        'endpoint': 'fal-ai/nano-banana-pro',
+        'size_param': 'aspect_ratio',
+        'image_input': 'multi',
+    },
+}
+
+FAL_IMAGE_SIZE_PRESETS = frozenset({
+    'square_hd', 'square',
+    'portrait_4_3', 'portrait_16_9',
+    'landscape_4_3', 'landscape_16_9',
+})
+
+FAL_ASPECT_RATIO_PRESETS = frozenset({
+    '1:1', '4:3', '3:4', '3:2', '2:3', '16:9', '9:16', '21:9',
+})
+
+
+def _is_fal_auth_error(err_msg: str) -> bool:
+    u = err_msg.upper()
+    return (
+        '401' in err_msg
+        or '403' in err_msg
+        or 'UNAUTHORIZED' in u
+        or 'FORBIDDEN' in u
+        or 'INVALID API KEY' in u
+        or 'INVALID_API_KEY' in u
+    )
+
+
+async def _fal_upload_reference_image(b64_data_url_or_raw: str) -> str:
+    """Upload a base64 image to fal storage and return its CDN url."""
+    raw = _strip_data_url(b64_data_url_or_raw)
+    img_bytes = base64.b64decode(raw)
+    return await fal_client.upload_async(img_bytes, 'image/png')
+
+
+async def _execute_fal_ai(data: dict, inputs: dict) -> dict:
+    if not _HAS_FAL:
+        return {
+            'error': (
+                'FAL AI: fal-client package is not installed. '
+                'Run: pip install -U fal-client'
+            ),
+        }
+
+    model_key = (data.get('model') or 'flux_dev').strip()
+    model_spec = FAL_MODELS.get(model_key)
+    if not model_spec:
+        return {'error': f'FAL AI: unknown model "{model_key}".'}
+
+    api_key = resolve_fal_api_key(data)
+    if not api_key:
+        return {
+            'error': (
+                'FAL AI: no API key configured. '
+                'Add your key in Settings, set FAL_KEY in backend/.env, or set apiKey on the node.'
+            ),
+        }
+
+    prompt = (inputs.get('prompt') or data.get('prompt') or '').strip()
+    if not prompt:
+        return {'error': 'FAL AI: no prompt provided'}
+
+    arguments: dict = {
+        'prompt': prompt,
+        'num_images': 1,
+    }
+
+    size_param = model_spec.get('size_param')
+    if size_param == 'image_size':
+        size = (data.get('imageSize') or 'square_hd').strip()
+        if size not in FAL_IMAGE_SIZE_PRESETS:
+            size = 'square_hd'
+        arguments['image_size'] = size
+    elif size_param == 'aspect_ratio':
+        ar = (data.get('aspectRatio') or '1:1').strip()
+        if ar not in FAL_ASPECT_RATIO_PRESETS:
+            ar = '1:1'
+        arguments['aspect_ratio'] = ar
+
+    steps_raw = data.get('numInferenceSteps')
+    if steps_raw is not None and size_param == 'image_size':
+        # Only FLUX/SD endpoints accept num_inference_steps; nano-banana ignores it.
+        try:
+            steps = int(steps_raw)
+            if 1 <= steps <= 50:
+                arguments['num_inference_steps'] = steps
+        except (TypeError, ValueError):
+            pass
+
+    seed_val = 0
+    try:
+        seed_val = int(data.get('seed', 0) or 0)
+    except (TypeError, ValueError):
+        seed_val = 0
+    if seed_val > 0:
+        arguments['seed'] = seed_val
+
+    # fal_client reads FAL_KEY from the environment for both upload and inference.
+    # Set it for the duration of this call (covers uploads + subscribe) and restore after.
+    prev_key = os.environ.get('FAL_KEY')
+    os.environ['FAL_KEY'] = api_key
+    try:
+        image_input_kind = model_spec.get('image_input')
+        if image_input_kind:
+            ref_images = _collect_reference_images(inputs)
+            if ref_images:
+                try:
+                    uploaded = []
+                    for ref in ref_images:
+                        uploaded.append(await _fal_upload_reference_image(ref))
+                except Exception as e:
+                    err_msg = str(e)
+                    if _is_fal_auth_error(err_msg):
+                        return {
+                            'error': (
+                                'FAL AI: invalid or expired API key while uploading '
+                                f'reference image. ({err_msg})'
+                            ),
+                        }
+                    return {'error': f'FAL AI: could not upload reference image — {err_msg}'}
+                if image_input_kind == 'single':
+                    arguments['image_url'] = uploaded[0]
+                else:
+                    arguments['image_urls'] = uploaded
+            elif image_input_kind == 'multi' and model_spec['endpoint'].endswith('/edit'):
+                # Edit endpoints require at least one input image.
+                return {
+                    'error': (
+                        'FAL AI: this edit model requires a reference image. '
+                        'Connect an image to Image 1.'
+                    ),
+                }
+
+        try:
+            result = await fal_client.subscribe_async(
+                model_spec['endpoint'],
+                arguments=arguments,
+                with_logs=False,
+            )
+        except Exception as e:
+            err_msg = str(e)
+            if _is_fal_auth_error(err_msg):
+                return {'error': f'FAL AI: Invalid or expired API key. ({err_msg})'}
+            if '404' in err_msg or 'not found' in err_msg.lower():
+                return {
+                    'error': (
+                        f'FAL AI: model endpoint "{model_spec["endpoint"]}" not found. '
+                        f'You may need access. ({err_msg})'
+                    ),
+                }
+            if '429' in err_msg or 'quota' in err_msg.lower() or 'rate' in err_msg.lower():
+                return {'error': f'FAL AI: rate-limited or out of quota. ({err_msg})'}
+            return {'error': f'FAL AI: API call failed — {err_msg}'}
+    finally:
+        if prev_key is None:
+            os.environ.pop('FAL_KEY', None)
+        else:
+            os.environ['FAL_KEY'] = prev_key
+
+    images = (result or {}).get('images') or []
+    if not images:
+        return {'error': 'FAL AI: API returned no images.'}
+
+    first = images[0] if isinstance(images[0], dict) else {}
+    img_url = first.get('url')
+    if not img_url:
+        return {'error': 'FAL AI: API response missing image url.'}
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0, verify=_SSL_VERIFY) as client:
+            img_resp = await client.get(img_url)
+        if img_resp.status_code != 200:
+            return {
+                'error': (
+                    f'FAL AI: failed to download generated image '
+                    f'({img_resp.status_code}).'
+                ),
+            }
+        img_bytes = img_resp.content
+    except httpx.TimeoutException:
+        return {'error': 'FAL AI: timed out fetching generated image.'}
+    except httpx.RequestError as e:
+        return {'error': f'FAL AI: network error fetching image — {e}'}
+
+    mime = first.get('content_type') or 'image/png'
+    if mime not in ('image/png', 'image/jpeg', 'image/webp'):
+        mime = 'image/png'
+
+    out_b64 = base64.b64encode(img_bytes).decode('ascii')
+    return {'image': f'data:{mime};base64,{out_b64}'}
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -811,6 +1082,8 @@ async def execute_ai_node(node_type: str, data: dict, inputs: dict) -> dict:
         return await _execute_gpt_image_2(data, inputs)
     if node_type == 'imageScfPrompt':
         return await _execute_image_scf_prompt(data, inputs)
+    if node_type == 'falAi':
+        return await _execute_fal_ai(data, inputs)
     if node_type == 'nanoBanana2Free':
         return {
             'error': (

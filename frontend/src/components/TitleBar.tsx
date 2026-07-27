@@ -1,20 +1,28 @@
+import { useCallback, useRef, useState, useEffect } from 'react';
 import { NavLink, useMatch, useNavigate } from 'react-router-dom';
 import { useWorkflowStore } from '../store/workflowStore';
-import { useCallback, useRef, useState, useEffect } from 'react';
-import { useAuth } from '../auth/AuthContext';
+import EditTemplateModal from './EditTemplateModal';
+import {
+  pinnedInputNodes,
+  pinnedOutputNodes,
+  suggestPinnedNodeIds,
+} from '../types/templateTypes';
 
 export default function TitleBar() {
-  const { firebaseEnabled, user, signOutUser } = useAuth();
   const isWorkflowRoute = useMatch('/workflow/:id');
   const navigate = useNavigate();
   const workflowName = useWorkflowStore((s) => s.workflowName);
   const workflowDescription = useWorkflowStore((s) => s.workflowDescription);
   const saveNow = useWorkflowStore((s) => s.saveNow);
   const setWorkflowName = useWorkflowStore((s) => s.setWorkflowName);
+  const nodes = useWorkflowStore((s) => s.nodes);
+  const edges = useWorkflowStore((s) => s.edges);
+  const template = useWorkflowStore((s) => s.template);
 
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
   const [descOpen, setDescOpen] = useState(false);
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const descPopoverRef = useRef<HTMLDivElement>(null);
   const descBtnRef = useRef<HTMLButtonElement>(null);
@@ -63,6 +71,17 @@ export default function TitleBar() {
     descText ||
     'No description. Double-click the workflow name to rename. To set an icon or this note, open Details on this workflow’s card in Projects.';
 
+  const hasPinnedInputs = pinnedInputNodes(nodes).length > 0;
+  const hasPinnedOutputs = pinnedOutputNodes(nodes).length > 0;
+  const canSuggestPins = suggestPinnedNodeIds(nodes, edges).length > 0;
+  const canOpenTemplateEditor =
+    hasPinnedInputs || hasPinnedOutputs || canSuggestPins || template != null;
+  const templateBtnTitle = !canOpenTemplateEditor
+    ? 'Pin at least one node first'
+    : template
+      ? 'Edit template'
+      : 'Set template';
+
   return (
     <div className="title-bar">
       <div className="title-bar-left">
@@ -96,6 +115,31 @@ export default function TitleBar() {
                     </div>
                   )}
                 </div>
+                <button
+                  type="button"
+                  className={`title-bar-icon-btn${template ? ' has-template' : ''}`}
+                  title={templateBtnTitle}
+                  aria-label={templateBtnTitle}
+                  disabled={!canOpenTemplateEditor}
+                  onClick={() => setTemplateModalOpen(true)}
+                >
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden
+                  >
+                    <rect x="3" y="3" width="7" height="7" rx="1" />
+                    <rect x="14" y="3" width="7" height="7" rx="1" />
+                    <rect x="3" y="14" width="7" height="7" rx="1" />
+                    <path d="M14 17h7M14 14h7M14 20h7" />
+                  </svg>
+                </button>
               </div>
               {renaming ? (
                 <input
@@ -128,9 +172,7 @@ export default function TitleBar() {
             to="/"
             end
             aria-label="Home"
-            className={({ isActive }) =>
-              `title-bar-brand-link${isActive ? ' title-bar-brand-link--active' : ''}`
-            }
+            className="title-bar-brand-link"
             onClick={async (e) => {
               if (isWorkflowRoute && saveNow) {
                 e.preventDefault();
@@ -140,10 +182,10 @@ export default function TitleBar() {
             }}
           >
             <img
-              src="/Logo2.svg"
+              src="/SpotOn-Logo.svg"
               alt=""
               className="title-bar-logo"
-              height={28}
+              height={20}
             />
           </NavLink>
         )}
@@ -182,6 +224,21 @@ export default function TitleBar() {
           Collection
         </NavLink>
         <NavLink
+          to="/playground"
+          className={({ isActive }) =>
+            `title-bar-tab${isActive ? ' active' : ''}`
+          }
+          onClick={async (e) => {
+            if (isWorkflowRoute && saveNow) {
+              e.preventDefault();
+              await saveNow();
+              navigate('/playground');
+            }
+          }}
+        >
+          Playground
+        </NavLink>
+        <NavLink
           to="/settings"
           className={({ isActive }) =>
             `title-bar-tab${isActive ? ' active' : ''}`
@@ -198,18 +255,8 @@ export default function TitleBar() {
         </NavLink>
       </nav>
 
-      <div className="title-bar-right">
-        {firebaseEnabled && user && (
-          <button
-            type="button"
-            className="title-bar-signout"
-            onClick={() => signOutUser()}
-            title="Sign out"
-          >
-            Sign out
-          </button>
-        )}
-      </div>
+      <div className="title-bar-right" />
+      <EditTemplateModal open={templateModalOpen} onClose={() => setTemplateModalOpen(false)} />
     </div>
   );
 }

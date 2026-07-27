@@ -101,12 +101,38 @@ def init_db():
         conn.execute('ALTER TABLE workflows ADD COLUMN description TEXT')
     if not _column_exists(conn, 'workflows', 'icon_color'):
         conn.execute('ALTER TABLE workflows ADD COLUMN icon_color TEXT')
+    if not _column_exists(conn, 'workflows', 'has_template'):
+        conn.execute('ALTER TABLE workflows ADD COLUMN has_template INTEGER NOT NULL DEFAULT 0')
     if not _column_exists(conn, 'collection', 'folder_id'):
         conn.execute('ALTER TABLE collection ADD COLUMN folder_id TEXT')
     if not _column_exists(conn, 'user_secrets', 'openai_api_key'):
         conn.execute('ALTER TABLE user_secrets ADD COLUMN openai_api_key TEXT')
+    if not _column_exists(conn, 'user_secrets', 'fal_api_key'):
+        conn.execute('ALTER TABLE user_secrets ADD COLUMN fal_api_key TEXT')
     conn.commit()
     conn.close()
+
+
+def vacuum_if_bloated(min_free_pages: int = 256) -> bool:
+    """Reclaim disk space left behind when large inline image blobs are removed
+    from `workflows.data` (e.g. by the client-side image-externalization
+    migration). VACUUM rewrites the DB file without the freed pages.
+
+    Only runs when the free-page list is large enough to be worth it, so it
+    stays cheap on a healthy DB and isn't paid on every startup. Uses an
+    autocommit connection because VACUUM cannot run inside a transaction.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.isolation_level = None
+        row = conn.execute('PRAGMA freelist_count').fetchone()
+        free = row[0] if row else 0
+        if free and free >= min_free_pages:
+            conn.execute('VACUUM')
+            return True
+        return False
+    finally:
+        conn.close()
 
 
 def _now_iso() -> str:
@@ -119,14 +145,26 @@ def _workflow_row_summary(r: sqlite3.Row) -> dict:
     d['description'] = d.get('description') or ''
     ic = d.get('icon_color')
     d['icon_color'] = ic if ic else None
+    d['has_template'] = bool(d.get('has_template'))
     return d
+
+
+_WORKFLOW_SUMMARY_COLUMNS = (
+    'id, name, icon_id, icon_color, description, has_template, updated_at, created_at'
+)
+
+
+def _has_template(data: dict | None) -> int:
+    """A workflow is a template when its graph carries a `template` object."""
+    if not isinstance(data, dict):
+        return 0
+    return 1 if isinstance(data.get('template'), dict) else 0
 
 
 def _legacy_list_workflows() -> list[dict]:
     conn = _get_conn()
     rows = conn.execute(
-        'SELECT id, name, icon_id, icon_color, description, updated_at, created_at FROM workflows '
-        'ORDER BY updated_at DESC'
+        f'SELECT {_WORKFLOW_SUMMARY_COLUMNS} FROM workflows ORDER BY updated_at DESC'
     ).fetchall()
     conn.close()
     return [_workflow_row_summary(r) for r in rows]
@@ -137,7 +175,7 @@ def list_workflows(owner_uid: str) -> list[dict]:
         return _legacy_list_workflows()
     conn = _get_conn()
     rows = conn.execute(
-        'SELECT id, name, icon_id, icon_color, description, updated_at, created_at FROM workflows '
+        f'SELECT {_WORKFLOW_SUMMARY_COLUMNS} FROM workflows '
         'WHERE owner_uid = ? ORDER BY updated_at DESC',
         (owner_uid,),
     ).fetchall()
@@ -173,6 +211,7 @@ def create_workflow(
         'icon_id': iid,
         'icon_color': icol,
         'description': desc,
+        'has_template': False,
         'created_at': now,
         'updated_at': now,
     }
@@ -198,6 +237,7 @@ def get_workflow(wf_id: str, owner_uid: str = LEGACY_OWNER_SENTINEL) -> dict | N
     d['description'] = d.get('description') or ''
     ic = d.get('icon_color')
     d['icon_color'] = ic if ic else None
+    d['has_template'] = bool(d.get('has_template'))
     return d
 
 
@@ -223,6 +263,9 @@ def update_workflow(
     now = _now_iso()
     new_name = name if name is not None else ex['name']
     new_data = json.dumps(data) if data is not None else ex['data']
+    new_has_template = (
+        _has_template(data) if data is not None else int(bool(ex.get('has_template')))
+    )
     cur_icon = ex.get('icon_id') or DEFAULT_WORKFLOW_ICON_ID
     new_icon_id = cur_icon if icon_id is None else ((icon_id or '').strip() or DEFAULT_WORKFLOW_ICON_ID)
     cur_desc = ex.get('description')
@@ -236,9 +279,18 @@ def update_workflow(
         new_icon_color = normalize_workflow_icon_color(icon_color)  # type: ignore[arg-type]
 
     conn.execute(
-        'UPDATE workflows SET name = ?, data = ?, icon_id = ?, icon_color = ?, description = ?, updated_at = ? '
-        'WHERE id = ?',
-        (new_name, new_data, new_icon_id, new_icon_color, new_description, now, wf_id),
+        'UPDATE workflows SET name = ?, data = ?, icon_id = ?, icon_color = ?, description = ?, '
+        'has_template = ?, updated_at = ? WHERE id = ?',
+        (
+            new_name,
+            new_data,
+            new_icon_id,
+            new_icon_color,
+            new_description,
+            new_has_template,
+            now,
+            wf_id,
+        ),
     )
     conn.commit()
     conn.close()
@@ -248,6 +300,7 @@ def update_workflow(
         'icon_id': new_icon_id,
         'icon_color': new_icon_color,
         'description': new_description,
+        'has_template': bool(new_has_template),
         'updated_at': now,
     }
 
@@ -591,7 +644,7 @@ def get_user_gemini_key_sqlite(uid: str) -> str | None:
 def set_user_gemini_key_sqlite(uid: str, api_key: str) -> None:
     conn = _get_conn()
     row = conn.execute(
-        'SELECT openai_api_key FROM user_secrets WHERE uid = ?', (uid,)
+        'SELECT uid FROM user_secrets WHERE uid = ?', (uid,)
     ).fetchone()
     if row:
         conn.execute(
@@ -600,7 +653,8 @@ def set_user_gemini_key_sqlite(uid: str, api_key: str) -> None:
         )
     else:
         conn.execute(
-            'INSERT INTO user_secrets (uid, gemini_api_key, openai_api_key) VALUES (?, ?, NULL)',
+            'INSERT INTO user_secrets (uid, gemini_api_key, openai_api_key, fal_api_key) '
+            'VALUES (?, ?, NULL, NULL)',
             (uid, api_key),
         )
     conn.commit()
@@ -616,7 +670,8 @@ def clear_user_gemini_key_sqlite(uid: str) -> None:
     conn.execute(
         """DELETE FROM user_secrets WHERE uid = ?
            AND IFNULL(TRIM(gemini_api_key), '') = ''
-           AND IFNULL(TRIM(openai_api_key), '') = ''""",
+           AND IFNULL(TRIM(openai_api_key), '') = ''
+           AND IFNULL(TRIM(fal_api_key), '') = ''""",
         (uid,),
     )
     conn.commit()
@@ -638,7 +693,7 @@ def get_user_openai_key_sqlite(uid: str) -> str | None:
 def set_user_openai_key_sqlite(uid: str, api_key: str) -> None:
     conn = _get_conn()
     row = conn.execute(
-        'SELECT gemini_api_key FROM user_secrets WHERE uid = ?', (uid,)
+        'SELECT uid FROM user_secrets WHERE uid = ?', (uid,)
     ).fetchone()
     if row:
         conn.execute(
@@ -647,7 +702,8 @@ def set_user_openai_key_sqlite(uid: str, api_key: str) -> None:
         )
     else:
         conn.execute(
-            'INSERT INTO user_secrets (uid, gemini_api_key, openai_api_key) VALUES (?, ?, ?)',
+            'INSERT INTO user_secrets (uid, gemini_api_key, openai_api_key, fal_api_key) '
+            'VALUES (?, ?, ?, NULL)',
             (uid, '', api_key),
         )
     conn.commit()
@@ -663,7 +719,57 @@ def clear_user_openai_key_sqlite(uid: str) -> None:
     conn.execute(
         """DELETE FROM user_secrets WHERE uid = ?
            AND IFNULL(TRIM(gemini_api_key), '') = ''
-           AND IFNULL(TRIM(openai_api_key), '') = ''""",
+           AND IFNULL(TRIM(openai_api_key), '') = ''
+           AND IFNULL(TRIM(fal_api_key), '') = ''""",
+        (uid,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_fal_key_sqlite(uid: str) -> str | None:
+    conn = _get_conn()
+    row = conn.execute(
+        'SELECT fal_api_key FROM user_secrets WHERE uid = ?', (uid,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    k = row['fal_api_key']
+    return k if _secret_nonempty(k) else None
+
+
+def set_user_fal_key_sqlite(uid: str, api_key: str) -> None:
+    conn = _get_conn()
+    row = conn.execute(
+        'SELECT uid FROM user_secrets WHERE uid = ?', (uid,)
+    ).fetchone()
+    if row:
+        conn.execute(
+            'UPDATE user_secrets SET fal_api_key = ? WHERE uid = ?',
+            (api_key, uid),
+        )
+    else:
+        conn.execute(
+            'INSERT INTO user_secrets (uid, gemini_api_key, openai_api_key, fal_api_key) '
+            'VALUES (?, ?, NULL, ?)',
+            (uid, '', api_key),
+        )
+    conn.commit()
+    conn.close()
+
+
+def clear_user_fal_key_sqlite(uid: str) -> None:
+    conn = _get_conn()
+    conn.execute(
+        'UPDATE user_secrets SET fal_api_key = NULL WHERE uid = ?',
+        (uid,),
+    )
+    conn.execute(
+        """DELETE FROM user_secrets WHERE uid = ?
+           AND IFNULL(TRIM(gemini_api_key), '') = ''
+           AND IFNULL(TRIM(openai_api_key), '') = ''
+           AND IFNULL(TRIM(fal_api_key), '') = ''""",
         (uid,),
     )
     conn.commit()

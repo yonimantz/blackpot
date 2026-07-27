@@ -8,7 +8,6 @@ dist/
 # Environment and secrets
 .env
 backend/.env
-backend/cloud-run-env.yaml
 *.local
 
 # Python

@@ -43,8 +43,27 @@ export default function WorkflowEditor() {
     if (!workflowId) return;
     const store = useWorkflowStore.getState();
 
-    const saveInterval = setInterval(() => {
-      store.saveNow?.();
+    // Run the (potentially heavy) serialize-and-upload on idle so it never
+    // competes with an interaction frame. `saveNow` is dirty-gated and
+    // guarded against overlap, so a quick re-check here just avoids
+    // scheduling idle callbacks when there's nothing to do.
+    type IdleHandle = number;
+    const ric: (cb: () => void) => IdleHandle =
+      typeof window.requestIdleCallback === 'function'
+        ? (cb) => window.requestIdleCallback(() => cb(), { timeout: 2000 })
+        : (cb) => window.setTimeout(cb, 0);
+    const cic: (handle: IdleHandle) => void =
+      typeof window.cancelIdleCallback === 'function'
+        ? (h) => window.cancelIdleCallback(h)
+        : (h) => window.clearTimeout(h);
+
+    let idleHandle: IdleHandle | null = null;
+    const saveInterval = window.setInterval(() => {
+      if (!useWorkflowStore.getState()._dirty) return;
+      idleHandle = ric(() => {
+        idleHandle = null;
+        store.saveNow?.();
+      });
     }, 3000);
 
     const handleBeforeUnload = () => {
@@ -54,6 +73,7 @@ export default function WorkflowEditor() {
 
     return () => {
       clearInterval(saveInterval);
+      if (idleHandle != null) cic(idleHandle);
       window.removeEventListener('beforeunload', handleBeforeUnload);
       store.saveNow?.();
     };

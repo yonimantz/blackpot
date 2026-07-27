@@ -1,9 +1,0 @@
-rules_version = '2';
-service firebase.storage {
-  match /b/{bucket}/o {
-    // Collection images and uploads are served via the backend only (Admin SDK).
-    match /{allPaths=**} {
-      allow read, write: if false;
-    }
-  }
-}

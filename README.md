@@ -1,23 +1,22 @@
 # Blackpot
 
-A ComfyUI-style node-based workflow editor for image generation and manipulation (React + Vite frontend, FastAPI backend).
+A ComfyUI-style node-based workflow editor for image generation and manipulation (React + Vite frontend, FastAPI backend). Runs locally as a single-user app against a local SQLite database.
 
 ## Project layout
 
 | Path | Purpose |
 |------|---------|
 | `frontend/` | React app (Vite, XYFlow canvas) |
-| `backend/` | FastAPI API, workflow engine, persistence (SQLite or Firestore) |
+| `backend/` | FastAPI API, workflow engine, local SQLite persistence |
 | `assets/` | Shared branding assets (e.g. `logo.svg`) |
-| `docs/` | [Publishing plan](docs/PUBLISHING_PLAN.md), [dev → publish](docs/DEV_TO_PUBLISH.md), [no GCP billing deploy](docs/PUBLISH_NO_GOOGLE_BILLING.md), [Gemini keys](docs/GEMINI_API_KEYS.md) |
-| `firebase.json` | Firebase Hosting + rules (production deploy) |
+| `docs/` | [Gemini API keys](docs/GEMINI_API_KEYS.md) |
 | `run.bat` | Windows: starts backend and frontend, opens the browser |
 
 The favicon and in-app icon are served from `frontend/public/` (e.g. `blackpot-icon.svg`). Use `assets/logo.svg` as an additional source asset when you need the same mark outside the web build.
 
 ## GitHub
 
-This folder is a Git repo on branch **`main`**. Secrets stay out of Git (see `.gitignore`: `backend/.env`, `backend/cloud-run-env.yaml`, `*.local`, `frontend/dist/`, etc.).
+This folder is a Git repo on branch **`main`**. Secrets stay out of Git (see `.gitignore`: `backend/.env`, `*.local`, `frontend/dist/`, etc.).
 
 To push to GitHub:
 
@@ -31,7 +30,7 @@ git push -u origin main
 
 If Git asks for a password, use a [personal access token](https://github.com/settings/tokens) (classic: enable `repo` scope) instead of your account password.
 
-## Quick start (local, no Firebase)
+## Quick start
 
 ### Windows (both servers)
 
@@ -50,9 +49,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Runs at `http://localhost:8000`. Set `GEMINI_API_KEY` in `backend/.env` for AI nodes; see [docs/GEMINI_API_KEYS.md](docs/GEMINI_API_KEYS.md).
-
-Leave `FIREBASE_PROJECT_ID` unset so the API does **not** require sign-in (SQLite keeps working as a single-user/dev setup).
+Runs at `http://localhost:8000`. Set `GEMINI_API_KEY` in `backend/.env` for AI nodes; see [docs/GEMINI_API_KEYS.md](docs/GEMINI_API_KEYS.md). Per-user API keys can also be saved from the in-app **Settings** page (stored in the local SQLite DB).
 
 ### Frontend (React)
 
@@ -64,72 +61,9 @@ npm run dev
 
 Runs at `http://localhost:5173`.
 
-Without `VITE_FIREBASE_*` variables, the UI does not show a login gate.
-
-## Firebase Auth and invite-only access
-
-When you are ready to publish for **specific people**:
-
-1. Create a Firebase project and enable **Authentication** (**Email/Password** and/or **Google**), **Firestore**, **Storage**, and **Hosting**.
-2. **Backend** (`backend/.env` or Cloud Run env):
-   - `FIREBASE_PROJECT_ID` — enables JWT verification on all protected API routes.
-   - `ALLOWLIST_EMAILS` — comma-separated list of allowed account emails (Google or email/password sign-in).
-   - Or create Firestore document `config/allowed_emails` with field `emails` (array of strings). If neither is set, **no one** is allowed unless you set `AUTH_SKIP_ALLOWLIST=1` (development only).
-   - `GOOGLE_APPLICATION_CREDENTIALS` — path to a service account JSON locally; on Cloud Run use the default service account with Firebase Admin permissions.
-3. **Frontend** — copy `frontend/.env.example` to `frontend/.env.local` and fill in the Firebase web app values from the Firebase console (`VITE_FIREBASE_*`).
-4. Users sign in with **email/password** (create account on the login screen) or **Google**, then open **Settings** and paste a [Google AI Studio](https://aistudio.google.com/apikey) API key. Keys are stored server-side (Firestore `userSecrets/{uid}` or SQLite `user_secrets` when testing with Auth locally).
-
-### Persistence backends
-
-| `DATA_BACKEND` | Use case |
-|----------------|----------|
-| `sqlite` (default) | Local dev; optional `owner_uid` columns when Firebase Auth is enabled |
-| `firestore` | Production on Cloud Run; requires `FIREBASE_PROJECT_ID` and Firebase Auth |
-
 ### CORS
 
-Set `CORS_ORIGINS` to a comma-separated list of allowed origins (e.g. `https://your-app.web.app`). Default `*` is only for convenience in local development.
-
-## Production deploy (Firebase Hosting + Cloud Run)
-
-**Windows scripts** (after `npx -y firebase-tools@latest login` and installing [Google Cloud SDK](https://cloud.google.com/sdk/docs/install)):
-
-1. Copy `backend/cloud-run-env.yaml.example` → `backend/cloud-run-env.yaml` and edit (gitignored).
-2. `powershell -ExecutionPolicy Bypass -File .\scripts\deploy-cloud-run.ps1` — deploys the API to Cloud Run.
-3. `powershell -ExecutionPolicy Bypass -File .\scripts\deploy-phase3.ps1` — rules + frontend build + Hosting.
-
-**Manual steps:**
-
-1. **Cloud Run** — build and deploy the backend from `backend/` (Dockerfile included):
-
-   ```bash
-   cd backend
-   # Set env: FIREBASE_PROJECT_ID, DATA_BACKEND=firestore, CORS_ORIGINS, ALLOWLIST_EMAILS, etc.
-   gcloud run deploy blackpot-api --source . --region us-central1
-   ```
-
-   The service id must match `firebase.json` → `hosting.rewrites[0].run.serviceId` (`blackpot-api`), or edit `firebase.json` to your service name.
-
-2. **Firestore & Storage rules** — from the repo root:
-
-   ```bash
-   npx -y firebase-tools@latest login
-   npx -y firebase-tools@latest use --add YOUR_PROJECT_ID
-   npx -y firebase-tools@latest deploy --only firestore:rules,storage
-   ```
-
-3. **Hosting** — build the frontend, then deploy:
-
-   ```bash
-   cd frontend && npm run build && cd ..
-   npx -y firebase-tools@latest deploy --only hosting
-   ```
-
-   Hosting serves `frontend/dist` and rewrites `/api/**` to your Cloud Run URL (same-origin `/api` in the browser).
-
-### Without Google Cloud billing (Render + Netlify)
-
-Cloud Run is not used. Deploy the API on **[Render](https://render.com)** from `backend/Dockerfile`, the static site on **Netlify**, and set **`VITE_API_BASE`** to your Render API URL when you run `npm run build`. Full steps: **[docs/PUBLISH_NO_GOOGLE_BILLING.md](docs/PUBLISH_NO_GOOGLE_BILLING.md)**. Optional blueprint: **`render.yaml`** in the repo root.
+Set `CORS_ORIGINS` in `backend/.env` to a comma-separated list of allowed origins if you change ports or run the frontend on a different host. Default `*` is fine for local dev.
 
 ## Usage
 
@@ -146,7 +80,7 @@ Cloud Run is not used. Deploy the API on **[Render](https://render.com)** from `
 ## Node types
 
 - **I/O**: Import Image, Export Image, Preview
-- **Tools**: Resize, Crop, Change Hue, Set Alpha, Brightness, Contrast, Blur, Sharpen, Color Overlay, Rotate/Flip
+- **Tools**: Resize, Crop, Change Hue, Brightness, Contrast, Blur, Sharpen, Color Overlay, Rotate/Flip
 - **Values**: Number, Color Picker, Text, Boolean
 - **Read data**: Get Image Size, Get Dominant Colors, Get Pixel Color
 - **AI**: Gemini-backed nodes (per-user key in Settings, optional `GEMINI_API_KEY` fallback, or per-node `apiKey`)

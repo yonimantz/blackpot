@@ -10,15 +10,22 @@ import {
   PORT_TYPE_COLORS,
   canConnect,
   getNodeInputs,
+  getNodeOutputs,
   pickSourceOutputHandleId,
   pickTargetInputHandleId,
+  DEFAULT_PREVIEW_NODE_WIDTH,
+  DEFAULT_PREVIEW_NODE_HEIGHT,
+  isNodeTypePinnable,
 } from '../types/nodeTypes';
+import type { WorkflowTemplate } from '../types/templateTypes';
+import { reconcileTemplate } from '../types/templateTypes';
 import {
   DEFAULT_WORKFLOW_ICON_COLOR,
   resolveWorkflowIconTint,
 } from '../constants/workflowIcons';
 import { getWorkflow as fetchWorkflow, saveWorkflow } from '../utils/api';
 import { getNodeImageOutputDataUrl } from '../utils/upstreamImage';
+import { assetIsReachable, uploadDataUrlAsAsset } from '../utils/importImageData';
 
 let nodeIdCounter = 0;
 let groupIdCounter = 0;
@@ -26,6 +33,107 @@ let groupIdCounter = 0;
 let pasteGeneration = 0;
 
 const MAX_UNDO = 20;
+
+/** Editor run uses node.data from JSON; normalize visibility flags so the backend always sees real booleans. */
+function normalizeEditorDataForRun(data: Record<string, any> | undefined): Record<string, any> {
+  if (!data || typeof data !== 'object') return data ?? {};
+  const layerCount = Math.max(0, Math.floor(Number(data.layerCount) || 0));
+  const raw = data.layers;
+  const layers: Record<string, any> =
+    raw && typeof raw === 'object' && !Array.isArray(raw) ? { ...(raw as Record<string, any>) } : {};
+  for (let i = 1; i <= layerCount; i++) {
+    const k = `layer${i}`;
+    const cfg = layers[k];
+    if (cfg != null && typeof cfg === 'object' && !Array.isArray(cfg)) {
+      layers[k] = {
+        ...cfg,
+        hidden: Boolean((cfg as Record<string, any>).hidden),
+      };
+    }
+  }
+  return {
+    ...data,
+    bgHidden: Boolean(data.bgHidden),
+    layerCount,
+    layers,
+  };
+}
+
+/**
+ * Strip regenerable / transient fields from node data before persisting.
+ *
+ * Image-heavy fields (baked previews, run results) are re-derived from their
+ * upstream sources on load (the bake effects re-run), so writing them to disk
+ * only bloats the saved JSON, the SQLite `workflows.data` column, and the 3s
+ * autosave `JSON.stringify`. We drop every `_`-prefixed key plus `previewData`.
+ * Real source data (e.g. `fileData`) is intentionally kept.
+ */
+function stripTransientNodeData(data: Record<string, any> | undefined): Record<string, any> {
+  if (!data || typeof data !== 'object') return data ?? {};
+  const out: Record<string, any> = {};
+  for (const key of Object.keys(data)) {
+    if (key.startsWith('_')) continue;
+    if (key === 'previewData') continue;
+    out[key] = data[key];
+  }
+  return out;
+}
+
+/** Set or clear `pinned`, dropping the key entirely when false so saved nodes stay lean. */
+function withPinnedFlag(data: Record<string, any>, pinned: boolean): Record<string, any> {
+  if (pinned) return { ...data, pinned: true };
+  const { pinned: _drop, ...rest } = data;
+  return rest;
+}
+
+/** Guards against overlapping autosaves (a slow save spanning multiple ticks). */
+let isSaving = false;
+
+/**
+ * One-time migration: externalize image bytes that older workflows stored
+ * inline as base64 (`fileData`) into the file store, replacing them with a
+ * lightweight `fileAssetId` reference. Runs in the background after a load so
+ * it never blocks opening a workflow. Bails if the user switches workflows
+ * mid-migration. The `_dirty` flag it sets lets the normal autosave persist
+ * the slimmed-down graph.
+ */
+async function migrateInlineImageAssets(
+  get: () => WorkflowState,
+  set: (partial: Partial<WorkflowState>) => void,
+): Promise<void> {
+  const wfId = get().workflowId;
+  const targets = get().nodes.filter(
+    (n) =>
+      n.type === 'importImage' &&
+      typeof (n.data as Record<string, any>)?.fileData === 'string' &&
+      ((n.data as Record<string, any>).fileData as string).startsWith('data:') &&
+      !(n.data as Record<string, any>).fileAssetId,
+  );
+  if (targets.length === 0) return;
+
+  for (const node of targets) {
+    const dataUrl = (node.data as Record<string, any>).fileData as string;
+    const fileId = await uploadDataUrlAsAsset(dataUrl);
+    if (!fileId) continue;
+    // Only externalize once we've confirmed the asset can be served back —
+    // otherwise (e.g. an older backend without the serving route) we'd drop a
+    // working inline image and show nothing.
+    if (!(await assetIsReachable(fileId))) continue;
+    // The user may have navigated away or the node may be gone / already
+    // migrated by the time the upload resolves.
+    if (get().workflowId !== wfId) return;
+    const current = get().nodes.find((n) => n.id === node.id);
+    if (!current || (current.data as Record<string, any>).fileAssetId) continue;
+    set({
+      nodes: get().nodes.map((n) =>
+        n.id === node.id
+          ? { ...n, data: { ...n.data, fileAssetId: fileId, fileData: '' } }
+          : n,
+      ),
+      _dirty: true,
+    });
+  }
+}
 
 /** True while applying undo/redo so we do not record new history entries. */
 let applyingHistory = false;
@@ -35,6 +143,17 @@ let coalescePosition = false;
 let moveUndoSessionDepth = 0;
 /** Skip per-frame history for dimension updates during resize. */
 let coalesceDimensions = false;
+
+/**
+ * Coalesce rapid `updateNodeData` calls that touch the same node + same field
+ * set into a single undo entry — same idea as `coalescePosition` but for data
+ * edits (typing, pasting, slider drags). Without this, every keystroke/paste
+ * pushes its own snapshot, churning the undo stack and making every paste pay
+ * the full snapshot cost.
+ */
+const DATA_EDIT_COALESCE_MS = 800;
+let lastDataEditCoalesceKey: string | null = null;
+let lastDataEditCoalesceTs = 0;
 
 /** Remove edges that target handles no longer defined on the node (e.g. after node schema changes). */
 function dropEdgesToRemovedTargetHandles(nodes: Node[], edges: Edge[]): Edge[] {
@@ -56,6 +175,13 @@ interface WorkflowSnapshot {
   selectedNodeId: string | null;
 }
 
+/**
+ * Snapshot the graph for undo/redo. Every mutation in this store creates fresh
+ * arrays/objects (spread + .map), so we can safely keep references instead of
+ * deep-cloning. structuredClone of a workflow with image data URLs (Import
+ * Image, baked previews, etc.) can take seconds and was previously paid on
+ * every keystroke / paste, which froze the UI.
+ */
 function takeGraphSnapshot(s: {
   nodes: Node[];
   edges: Edge[];
@@ -64,9 +190,9 @@ function takeGraphSnapshot(s: {
   selectedNodeId: string | null;
 }): WorkflowSnapshot {
   return {
-    nodes: structuredClone(s.nodes),
-    edges: structuredClone(s.edges),
-    groups: structuredClone(s.groups),
+    nodes: s.nodes,
+    edges: s.edges,
+    groups: s.groups,
     focusedGroupId: s.focusedGroupId,
     selectedNodeId: s.selectedNodeId,
   };
@@ -76,6 +202,10 @@ function pushUndoSnapshot(get: () => WorkflowState, set: (partial: Partial<Workf
   if (applyingHistory) return;
   const s = get();
   const snap = takeGraphSnapshot(s);
+  // A non-data-edit push breaks any in-flight text-edit coalesce window so
+  // the next keystroke still gets its own snapshot if it touches a different
+  // operation.
+  lastDataEditCoalesceKey = null;
   set({
     past: [...s.past, snap].slice(-MAX_UNDO),
     future: [],
@@ -99,6 +229,8 @@ function resetUndoCoalesceState() {
   coalescePosition = false;
   coalesceDimensions = false;
   moveUndoSessionDepth = 0;
+  lastDataEditCoalesceKey = null;
+  lastDataEditCoalesceTs = 0;
 }
 
 /** When a compositor's background input is wired to an image, match canvas size to the image (no extra undo step). */
@@ -131,10 +263,7 @@ function scheduleCompositorCanvasSizeFromSource(
   img.src = src;
 }
 
-const GROUP_COLORS = [
-  '#6366f1', '#f87171', '#4ade80', '#facc15',
-  '#818cf8', '#fb923c', '#2dd4bf', '#f472b6',
-];
+const GROUP_COLOR = '#8b5cf6';
 
 export interface NodeGroup {
   id: string;
@@ -181,10 +310,14 @@ export interface WorkflowState {
   workflowIconId: string | null;
   workflowIconColor: string;
   workflowDescription: string | null;
+  /** Published template for this workflow, or null if it was never set. */
+  template: WorkflowTemplate | null;
   _dirty: boolean;
 
   /** When set, Crop modal is open for this node (inspector or node button). */
   cropEditorModalNodeId: string | null;
+  /** When set, Divider modal is open for this node (inspector or node button). */
+  dividerEditorModalNodeId: string | null;
 
   past: WorkflowSnapshot[];
   future: WorkflowSnapshot[];
@@ -208,8 +341,19 @@ export interface WorkflowState {
     wire: { originNodeId: string; handleId: string; handleType: 'source' | 'target' },
   ) => void;
   updateNodeData: (nodeId: string, data: Record<string, any>) => void;
+  /**
+   * Ensure a preview node has explicit dimensions set so subsequent
+   * `previewData` updates don't cause the node to auto-grow/shrink to
+   * fit the image. Uses the currently measured size when available,
+   * otherwise falls back to the preview default.
+   */
+  lockPreviewNodeSize: (nodeId: string) => void;
   toggleBypass: (nodeId: string) => void;
   setBypassForNodeIds: (nodeIds: string[], bypassed: boolean) => void;
+  togglePin: (nodeId: string) => void;
+  setPinnedForNodeIds: (nodeIds: string[], pinned: boolean) => void;
+  /** Publish (or re-publish) the template. Pass null to unpublish. */
+  setTemplate: (template: WorkflowTemplate | null) => void;
   deleteSelectedNodes: () => void;
   deleteSelectedElements: () => void;
   removeEdgesByIds: (ids: string[]) => void;
@@ -239,6 +383,8 @@ export interface WorkflowState {
 
   openCropEditorModal: (nodeId: string) => void;
   closeCropEditorModal: () => void;
+  openDividerEditorModal: (nodeId: string) => void;
+  closeDividerEditorModal: () => void;
 
   copySelectedNodes: () => Promise<void>;
   tryPasteWorkflowClipboardText: (text: string) => boolean;
@@ -310,9 +456,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   workflowIconId: null,
   workflowIconColor: DEFAULT_WORKFLOW_ICON_COLOR,
   workflowDescription: null,
+  template: null,
   _dirty: false,
 
   cropEditorModalNodeId: null,
+  dividerEditorModalNodeId: null,
 
   past: [],
   future: [],
@@ -350,9 +498,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const newFuture = [...s.future, current].slice(-MAX_UNDO);
     applyingHistory = true;
     set({
-      nodes: structuredClone(prev.nodes),
-      edges: structuredClone(prev.edges),
-      groups: structuredClone(prev.groups),
+      nodes: prev.nodes,
+      edges: prev.edges,
+      groups: prev.groups,
       focusedGroupId: prev.focusedGroupId,
       selectedNodeId: prev.selectedNodeId,
       past: newPast,
@@ -360,6 +508,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       _dirty: true,
     });
     applyingHistory = false;
+    lastDataEditCoalesceKey = null;
   },
 
   redo: () => {
@@ -371,9 +520,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const newPast = [...s.past, current].slice(-MAX_UNDO);
     applyingHistory = true;
     set({
-      nodes: structuredClone(next.nodes),
-      edges: structuredClone(next.edges),
-      groups: structuredClone(next.groups),
+      nodes: next.nodes,
+      edges: next.edges,
+      groups: next.groups,
       focusedGroupId: next.focusedGroupId,
       selectedNodeId: next.selectedNodeId,
       past: newPast,
@@ -381,13 +530,21 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       _dirty: true,
     });
     applyingHistory = false;
+    lastDataEditCoalesceKey = null;
   },
 
   onNodesChange: (changes) => {
     if (shouldPushForNodeChanges(changes)) {
       pushUndoSnapshot(get, set);
     }
-    set({ nodes: applyNodeChanges(changes, get().nodes), _dirty: true });
+    // Selection state isn't persisted (saveNow never writes `selected`), so a
+    // box-select shouldn't mark the workflow dirty — otherwise the 3s autosave
+    // keeps re-uploading the whole graph (incl. base64 images) every selection.
+    const selectionOnly = changes.every((c) => c.type === 'select');
+    set({
+      nodes: applyNodeChanges(changes, get().nodes),
+      ...(selectionOnly ? {} : { _dirty: true }),
+    });
     const selectionChange = changes.find(
       (c): c is NodeChange & { type: 'select'; id: string; selected: boolean } =>
         c.type === 'select' && 'selected' in c && (c as any).selected
@@ -414,7 +571,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const targetDef = NODE_TYPE_DEFINITIONS[targetNode.type!];
     if (!sourceDef || !targetDef) return;
 
-    const sourcePort = sourceDef.outputs.find((p) => p.id === connection.sourceHandle);
+    const sourceOutputs = getNodeOutputs(sourceNode.type!, sourceNode.data as Record<string, any>);
+    const sourcePort = sourceOutputs.find((p) => p.id === connection.sourceHandle);
     const targetInputs = getNodeInputs(targetNode.type!, targetNode.data);
     const targetPort = targetInputs.find((p) => p.id === connection.targetHandle);
     if (!sourcePort || !targetPort) return;
@@ -449,6 +607,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   closeCropEditorModal: () => set({ cropEditorModalNodeId: null }),
 
+  openDividerEditorModal: (nodeId) => set({ dividerEditorModalNodeId: nodeId, selectedNodeId: nodeId }),
+
+  closeDividerEditorModal: () => set({ dividerEditorModalNodeId: null }),
+
   addNode: (type, position, dataOverrides) => {
     const def = NODE_TYPE_DEFINITIONS[type];
     if (!def) return;
@@ -460,6 +622,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       position,
       data: { ...def.defaults, label: def.label, bypassed: false, ...dataOverrides },
       selected: false,
+      ...(type === 'preview'
+        ? { width: DEFAULT_PREVIEW_NODE_WIDTH, height: DEFAULT_PREVIEW_NODE_HEIGHT }
+        : {}),
     };
     set({ nodes: [...get().nodes, newNode], _dirty: true });
   },
@@ -481,7 +646,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     let connection: Connection;
 
     if (wire.handleType === 'source') {
-      const sourcePort = originDef.outputs.find((p) => p.id === wire.handleId);
+      const sourcePort = getNodeOutputs(originNode.type!, originNode.data as Record<string, any>).find(
+        (p) => p.id === wire.handleId,
+      );
       if (!sourcePort) return;
       const targetHandle = pickTargetInputHandleId(newNodeType, newData, sourcePort.type);
       if (!targetHandle) return;
@@ -511,6 +678,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       position,
       data: newData,
       selected: false,
+      ...(newNodeType === 'preview'
+        ? { width: DEFAULT_PREVIEW_NODE_WIDTH, height: DEFAULT_PREVIEW_NODE_HEIGHT }
+        : {}),
     };
 
     const resolvedSource = connection.source === id ? newNode : originNode;
@@ -520,7 +690,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const resolvedTargetDef = NODE_TYPE_DEFINITIONS[resolvedTarget.type!];
     if (!resolvedSourceDef || !resolvedTargetDef) return;
 
-    const sp = resolvedSourceDef.outputs.find((p) => p.id === connection.sourceHandle);
+    const sp = getNodeOutputs(resolvedSource.type!, resolvedSource.data as Record<string, any>).find(
+      (p) => p.id === connection.sourceHandle,
+    );
     const tInputs = getNodeInputs(resolvedTarget.type!, resolvedTarget.data);
     const tp = tInputs.find((p) => p.id === connection.targetHandle);
     if (!sp || !tp || !canConnect(sp.type, tp.type)) return;
@@ -553,11 +725,36 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   updateNodeData: (nodeId, data) => {
-    pushUndoSnapshot(get, set);
+    const fieldKey = Object.keys(data).sort().join(',');
+    const coalesceKey = `${nodeId}::${fieldKey}`;
+    const now = Date.now();
+    const sameRapidEdit =
+      lastDataEditCoalesceKey === coalesceKey &&
+      now - lastDataEditCoalesceTs < DATA_EDIT_COALESCE_MS;
+    if (!sameRapidEdit) {
+      pushUndoSnapshot(get, set);
+    }
+    lastDataEditCoalesceKey = coalesceKey;
+    lastDataEditCoalesceTs = now;
     set({
       nodes: get().nodes.map((n) =>
         n.id === nodeId ? { ...n, data: { ...n.data, ...data } } : n
       ),
+      _dirty: true,
+    });
+  },
+
+  lockPreviewNodeSize: (nodeId) => {
+    const nodes = get().nodes;
+    const target = nodes.find((n) => n.id === nodeId);
+    if (!target || target.type !== 'preview') return;
+    if (target.width != null && target.height != null) return;
+    const measured = (target as Node & { measured?: { width?: number; height?: number } })
+      .measured;
+    const width = target.width ?? measured?.width ?? DEFAULT_PREVIEW_NODE_WIDTH;
+    const height = target.height ?? measured?.height ?? DEFAULT_PREVIEW_NODE_HEIGHT;
+    set({
+      nodes: nodes.map((n) => (n.id === nodeId ? { ...n, width, height } : n)),
       _dirty: true,
     });
   },
@@ -594,6 +791,37 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       ),
       _dirty: true,
     });
+  },
+
+  togglePin: (nodeId) => {
+    const node = get().nodes.find((n) => n.id === nodeId);
+    if (!node || !isNodeTypePinnable(node.type)) return;
+    get().setPinnedForNodeIds([nodeId], !node.data.pinned);
+  },
+
+  setPinnedForNodeIds: (nodeIds, pinned) => {
+    const idSet = new Set(nodeIds);
+    if (idSet.size === 0) return;
+    const { nodes, template } = get();
+    const targets = nodes.filter(
+      (n) => idSet.has(n.id) && isNodeTypePinnable(n.type) && Boolean(n.data.pinned) !== pinned,
+    );
+    if (targets.length === 0) return;
+    const changed = new Set(targets.map((n) => n.id));
+    pushUndoSnapshot(get, set);
+    const nextNodes = nodes.map((n) =>
+      changed.has(n.id) ? { ...n, data: withPinnedFlag(n.data as Record<string, any>, pinned) } : n,
+    );
+    set({
+      nodes: nextNodes,
+      // A published template must not drift from the pins it describes.
+      template: template ? reconcileTemplate(template, nextNodes) : null,
+      _dirty: true,
+    });
+  },
+
+  setTemplate: (template) => {
+    set({ template, _dirty: true });
   },
 
   toggleGroupFocus: (groupId) => {
@@ -681,7 +909,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const targetDef = NODE_TYPE_DEFINITIONS[targetNode.type!];
     if (!sourceDef || !targetDef) return;
 
-    const sourcePort = sourceDef.outputs.find((p) => p.id === newConnection.sourceHandle);
+    const sourceOutputs = getNodeOutputs(sourceNode.type!, sourceNode.data as Record<string, any>);
+    const sourcePort = sourceOutputs.find((p) => p.id === newConnection.sourceHandle);
     const targetInputs = getNodeInputs(targetNode.type!, targetNode.data);
     const targetPort = targetInputs.find((p) => p.id === newConnection.targetHandle);
     if (!sourcePort || !targetPort) return;
@@ -723,7 +952,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       nodes: nodes.map((n) => ({
         id: n.id,
         type: n.type,
-        data: n.data,
+        data:
+          n.type === 'editor'
+            ? normalizeEditorDataForRun(n.data as Record<string, any>)
+            : n.data,
         position: n.position,
         ...(n.style ? { style: n.style } : {}),
         ...(n.width != null ? { width: n.width } : {}),
@@ -745,7 +977,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     const baseNodes = nodes.map((n) => ({
       id: n.id,
       type: n.type,
-      data: n.data,
+      data:
+        n.type === 'editor'
+          ? normalizeEditorDataForRun(n.data as Record<string, any>)
+          : n.data,
       position: n.position,
       ...(n.style ? { style: n.style } : {}),
       ...(n.width != null ? { width: n.width } : {}),
@@ -848,7 +1083,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       id: `group_${++groupIdCounter}_${Date.now()}`,
       name: 'Group',
       nodeIds: selectedNodeIds,
-      color: GROUP_COLORS[updatedGroups.length % GROUP_COLORS.length],
+      color: GROUP_COLOR,
     };
 
     const nextGroups = [...updatedGroups, newGroup];
@@ -943,14 +1178,18 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         nodes: loadedNodes,
         edges: loadedEdges,
         groups: data.groups || [],
+        template: data.template ? reconcileTemplate(data.template, loadedNodes) : null,
         focusedGroupId: null,
         selectedNodeId: null,
         cropEditorModalNodeId: null,
+        dividerEditorModalNodeId: null,
         runResults: {},
         _dirty: false,
         past: [],
         future: [],
       });
+      // Externalize any legacy inline images in the background.
+      void migrateInlineImageAssets(get, set);
       return true;
     } catch {
       return false;
@@ -967,15 +1206,20 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       nodes,
       edges,
       groups,
+      template,
       _dirty,
     } = get();
     if (!workflowId || !_dirty) return;
+    // Don't let a slow save overlap with the next autosave tick — otherwise two
+    // big serializations/uploads pile up on the main thread.
+    if (isSaving) return;
+    isSaving = true;
 
     const data = {
       nodes: nodes.map((n) => ({
         id: n.id,
         type: n.type,
-        data: n.data,
+        data: stripTransientNodeData(n.data as Record<string, any>),
         position: n.position,
         ...(n.style ? { style: n.style } : {}),
         ...(n.width != null ? { width: n.width } : {}),
@@ -990,8 +1234,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         style: e.style,
       })),
       groups,
+      ...(template ? { template } : {}),
     };
 
+    // Clear the dirty flag up-front: edits made *during* the await should
+    // re-dirty the store so the next tick saves them, rather than being lost
+    // when this save resolves and clears the flag.
+    set({ _dirty: false });
     try {
       await saveWorkflow(workflowId, {
         name: workflowName || undefined,
@@ -1000,9 +1249,11 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         icon_color: workflowIconColor,
         description: workflowDescription ?? '',
       });
-      set({ _dirty: false });
     } catch {
-      // silent failure — will retry on next interval
+      // Save failed — mark dirty again so the next interval retries.
+      set({ _dirty: true });
+    } finally {
+      isSaving = false;
     }
   },
 
@@ -1026,12 +1277,14 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       workflowIconId: null,
       workflowIconColor: DEFAULT_WORKFLOW_ICON_COLOR,
       workflowDescription: null,
+      template: null,
       nodes: [],
       edges: [],
       groups: [],
       focusedGroupId: null,
       selectedNodeId: null,
       cropEditorModalNodeId: null,
+      dividerEditorModalNodeId: null,
       runResults: {},
       _dirty: false,
       past: [],

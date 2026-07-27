@@ -1,44 +1,9 @@
 import { useRef } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
 import { runWorkflowStreaming, cancelWorkflow } from '../utils/api';
+import { applyNodeResult, formatWorkflowRunErrors } from '../utils/applyRunResult';
 
 const streamingResults: Record<string, any> = {};
-
-function applyNodeResult(nodeId: string, result: any) {
-  streamingResults[nodeId] = result;
-  const store = useWorkflowStore.getState();
-  const node = store.nodes.find((n) => n.id === nodeId);
-  if (!node) return;
-
-  if (result.error || result.skipped) return;
-
-  if (node.type === 'preview' && result.image) {
-    store.updateNodeData(nodeId, { previewData: result.image });
-  }
-  if (node.type === 'editor' && result.image) {
-    store.updateNodeData(nodeId, { _editorPreview: result.image });
-  }
-  if (node.type === 'compositor' && result.image) {
-    store.updateNodeData(nodeId, { _compositorPreview: result.image });
-  }
-  if (node.type === 'vignette' && result.image) {
-    store.updateNodeData(nodeId, { _vignettePreview: result.image });
-  }
-  if (node.type === 'exportImage' && result.saved) {
-    store.updateNodeData(nodeId, { _lastExportedPath: result.saved, _result: result });
-  } else if (result.image && node.type !== 'preview') {
-    store.updateNodeData(nodeId, { _result: result });
-  } else if (
-    typeof result.text === 'string' &&
-    result.image == null &&
-    result.data == null
-  ) {
-    store.updateNodeData(nodeId, { text: result.text, _result: result });
-  }
-  if (result.data) {
-    store.updateNodeData(nodeId, { _result: result.data });
-  }
-}
 
 export default function RunButton() {
   const {
@@ -68,7 +33,7 @@ export default function RunButton() {
           },
           onNodeDone: (nodeId, result) => {
             useWorkflowStore.getState().markNodeCompleted(nodeId);
-            if (result) applyNodeResult(nodeId, result);
+            if (result) applyNodeResult(nodeId, result, streamingResults);
           },
         },
         controller.signal,
@@ -79,21 +44,7 @@ export default function RunButton() {
       setActiveNodeId(null);
       setRunResults(mergedResults);
 
-      const errors: string[] = [];
-      for (const [nodeId, result] of Object.entries(mergedResults)) {
-        if (nodeId === '_cancelled') continue;
-        if (result.skipped && !result.error) continue;
-        if (result.error) {
-          const node = useWorkflowStore.getState().nodes.find((n) => n.id === nodeId);
-          const label = (node?.data?.label as string) || node?.type || nodeId;
-          let msg = String(result.error);
-          const dup = `${label}: `;
-          if (msg.startsWith(dup)) {
-            msg = msg.slice(dup.length);
-          }
-          errors.push(`${label}: ${msg}`);
-        }
-      }
+      const errors = formatWorkflowRunErrors(mergedResults);
       if (errors.length > 0) {
         alert(`Workflow errors:\n\n${errors.join('\n\n')}`);
       }

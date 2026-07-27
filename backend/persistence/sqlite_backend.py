@@ -143,3 +143,18 @@ class SqliteBackend:
         if owner_uid == db.LEGACY_OWNER_SENTINEL:
             return
         db.clear_user_openai_key_sqlite(owner_uid)
+
+    def get_user_fal_key(self, owner_uid: str) -> str | None:
+        if owner_uid == db.LEGACY_OWNER_SENTINEL:
+            return None
+        return db.get_user_fal_key_sqlite(owner_uid)
+
+    def set_user_fal_key(self, owner_uid: str, api_key: str) -> None:
+        if owner_uid == db.LEGACY_OWNER_SENTINEL:
+            raise ValueError('Cannot store API key without a signed-in user')
+        db.set_user_fal_key_sqlite(owner_uid, api_key)
+
+    def clear_user_fal_key(self, owner_uid: str) -> None:
+        if owner_uid == db.LEGACY_OWNER_SENTINEL:
+            return
+        db.clear_user_fal_key_sqlite(owner_uid)

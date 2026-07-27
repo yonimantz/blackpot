@@ -3,9 +3,7 @@ import { createWorkflow, saveWorkflow, type WorkflowFull } from '../utils/api';
 import {
   DEFAULT_WORKFLOW_ICON_COLOR,
   DEFAULT_WORKFLOW_ICON_ID,
-  WORKFLOW_ICONS,
   WORKFLOW_ICON_PALETTE,
-  WorkflowIcon,
 } from '../constants/workflowIcons';
 
 export type WorkflowMetaSaved = {
@@ -39,7 +37,7 @@ export default function WorkflowMetaModal({
   onEdited?: (meta: WorkflowMetaSaved) => void;
 }) {
   const [name, setName] = useState(initialName);
-  const [iconId, setIconId] = useState(initialIconId || DEFAULT_WORKFLOW_ICON_ID);
+  const iconId = initialIconId || DEFAULT_WORKFLOW_ICON_ID;
   const [iconColor, setIconColor] = useState<string>(() => {
     const c = initialIconColor?.trim();
     return c && WORKFLOW_ICON_PALETTE.some((p) => p.hex === c) ? c : DEFAULT_WORKFLOW_ICON_COLOR;
@@ -51,13 +49,12 @@ export default function WorkflowMetaModal({
   useEffect(() => {
     if (!open) return;
     setName(initialName || 'Untitled Workflow');
-    setIconId(initialIconId || DEFAULT_WORKFLOW_ICON_ID);
     const ic = initialIconColor?.trim();
     setIconColor(ic && WORKFLOW_ICON_PALETTE.some((p) => p.hex === ic) ? ic : DEFAULT_WORKFLOW_ICON_COLOR);
     setDescription(initialDescription ?? '');
     setError(null);
     setBusy(false);
-  }, [open, initialName, initialIconId, initialIconColor, initialDescription]);
+  }, [open, initialName, initialIconColor, initialDescription]);
 
   const handleSubmit = useCallback(async () => {
     const trimmedName = name.trim() || 'Untitled Workflow';
@@ -155,21 +152,6 @@ export default function WorkflowMetaModal({
             })}
           </div>
 
-          <span className="workflow-meta-label workflow-meta-label--block workflow-meta-label--center">Icon</span>
-          <div className="workflow-meta-icon-grid">
-            {WORKFLOW_ICONS.map(({ id, label }) => (
-              <button
-                key={id}
-                type="button"
-                className={`workflow-meta-icon-btn${iconId === id ? ' workflow-meta-icon-btn--selected' : ''}`}
-                title={label}
-                onClick={() => setIconId(id)}
-                disabled={busy}
-              >
-                <WorkflowIcon iconId={id} iconColor={iconColor} size={48} />
-              </button>
-            ))}
-          </div>
         </div>
 
         <label className="workflow-meta-label">

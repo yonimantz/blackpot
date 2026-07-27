@@ -7,6 +7,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
+import { getUploadFileUrl } from '../utils/api';
 import { MAX_COMPOSITOR_LAYERS } from '../types/nodeTypes';
 import {
   createCompositorLayer,
@@ -29,6 +30,9 @@ function _getConnectedImageSrc(
   const sourceNode = allNodes.find((n) => n.id === edge.source);
   if (!sourceNode) return null;
   const d = sourceNode.data;
+  if (typeof d?.fileAssetId === 'string' && d.fileAssetId) {
+    return getUploadFileUrl(d.fileAssetId);
+  }
   return (
     d?.fileData ||
     d?._result?.image ||

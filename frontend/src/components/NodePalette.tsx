@@ -5,6 +5,7 @@ import { useWorkflowStore } from '../store/workflowStore';
 export default function NodePalette() {
   const isRunning = useWorkflowStore((s) => s.isRunning);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
+    general: true,
     io: true,
     tool: true,
     text: true,

@@ -1,22 +1,11 @@
-import { getFirebaseAuth, isFirebaseConfigured } from '../firebase';
-
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || '/api';
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 2000;
 
-/** Attach Firebase ID token when the app is configured for auth. */
+/** Plain fetch wrapper. Kept named `authFetch` so existing call sites stay unchanged. */
 export async function authFetch(input: string | Request, init?: RequestInit): Promise<Response> {
-  const headers = new Headers(init?.headers);
-  if (isFirebaseConfigured()) {
-    const auth = getFirebaseAuth();
-    const u = auth.currentUser;
-    if (u) {
-      const token = await u.getIdToken();
-      headers.set('Authorization', `Bearer ${token}`);
-    }
-  }
-  return fetch(input, { ...init, headers });
+  return fetch(input, init);
 }
 
 async function waitForBackend(signal?: AbortSignal): Promise<void> {
@@ -189,6 +178,38 @@ export async function cancelWorkflow(): Promise<void> {
   await authFetch(`${API_BASE}/run/cancel`, { method: 'POST' });
 }
 
+export interface ExportImageItem {
+  image: string;
+  fileName: string;
+  format: string;
+}
+
+export interface ExportImagesResult {
+  saved: string[];
+  errors: string[];
+}
+
+/** Write each connected image to disk on demand (Export button). */
+export async function exportImages(
+  items: ExportImageItem[],
+  exportPath = '',
+): Promise<ExportImagesResult> {
+  const res = await authFetch(`${API_BASE}/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items, exportPath }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    const detail =
+      err?.detail ??
+      err?.message ??
+      `Backend returned HTTP ${res.status} ${res.statusText}`;
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+  }
+  return res.json();
+}
+
 export async function uploadFile(file: File): Promise<{ fileId: string; dataUrl: string }> {
   const formData = new FormData();
   formData.append('file', file);
@@ -198,6 +219,24 @@ export async function uploadFile(file: File): Promise<{ fileId: string; dataUrl:
   });
   if (!res.ok) throw new Error('Upload failed');
   return res.json();
+}
+
+/** Upload raw bytes (File or Blob) to the file store and return its id only. */
+export async function uploadImageBlob(blob: Blob, filename = 'image.png'): Promise<string> {
+  const formData = new FormData();
+  formData.append('file', blob, filename);
+  const res = await authFetch(`${API_BASE}/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) throw new Error('Upload failed');
+  const json = (await res.json()) as { fileId: string };
+  return json.fileId;
+}
+
+/** Stable URL that serves a previously uploaded asset by id. */
+export function getUploadFileUrl(fileId: string): string {
+  return `${API_BASE}/upload/${fileId}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +249,8 @@ export interface WorkflowSummary {
   icon_id?: string;
   icon_color?: string | null;
   description?: string;
+  /** True when the workflow has a published template (see `data.template`). */
+  has_template?: boolean;
   updated_at: string;
   created_at: string;
 }
@@ -220,7 +261,7 @@ export interface WorkflowFull {
   icon_id?: string;
   icon_color?: string | null;
   description?: string;
-  data: { nodes: any[]; edges: any[]; groups?: any[] };
+  data: { nodes: any[]; edges: any[]; groups?: any[]; template?: any };
   created_at: string;
   updated_at: string;
 }
@@ -441,6 +482,42 @@ export async function setUserOpenAIKey(apiKey: string): Promise<void> {
 
 export async function clearUserOpenAIKey(): Promise<void> {
   const res = await authFetch(`${API_BASE}/user/openai-key`, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.detail || 'Failed to clear API key');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// User settings (fal.ai API key)
+// ---------------------------------------------------------------------------
+
+export async function getFalKeyStatus(): Promise<{
+  hasKey: boolean;
+  managedByEnv: boolean;
+}> {
+  const res = await authFetch(`${API_BASE}/user/fal-key`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.detail || 'Failed to load key status');
+  }
+  return res.json();
+}
+
+export async function setUserFalKey(apiKey: string): Promise<void> {
+  const res = await authFetch(`${API_BASE}/user/fal-key`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.detail || 'Failed to save API key');
+  }
+}
+
+export async function clearUserFalKey(): Promise<void> {
+  const res = await authFetch(`${API_BASE}/user/fal-key`, { method: 'DELETE' });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err?.detail || 'Failed to clear API key');

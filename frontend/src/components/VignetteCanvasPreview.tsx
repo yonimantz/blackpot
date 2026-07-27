@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
+import { getUploadFileUrl } from '../utils/api';
 import {
   applyVignetteLayersToRgba,
   type VignetteLayerData,
@@ -15,6 +16,9 @@ function getConnectedImageSrc(
   const sourceNode = allNodes.find((n) => n.id === edge.source);
   if (!sourceNode) return null;
   const d = sourceNode.data;
+  if (typeof d?.fileAssetId === 'string' && d.fileAssetId) {
+    return getUploadFileUrl(d.fileAssetId);
+  }
   return (
     d?.fileData ||
     d?._result?.image ||

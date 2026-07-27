@@ -1,9 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { listWorkflows, deleteWorkflow, renameWorkflow, type WorkflowSummary } from '../utils/api';
+import {
+  createWorkflow,
+  deleteWorkflow,
+  getWorkflow,
+  listWorkflows,
+  renameWorkflow,
+  saveWorkflow,
+  type WorkflowSummary,
+} from '../utils/api';
 import WorkflowMetaModal from '../components/WorkflowMetaModal';
 import { WorkflowIcon } from '../constants/workflowIcons';
 import type { WorkflowMetaSaved } from '../components/WorkflowMetaModal';
+import {
+  BLPW_EXTENSION,
+  exportWorkflowToFile,
+  readBlpwFile,
+} from '../utils/workflowFile';
 
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -36,6 +49,9 @@ export default function ProjectsPage() {
   const renameRef = useRef<HTMLInputElement>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<WorkflowSummary | null>(null);
+  const [exportingId, setExportingId] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -86,13 +102,98 @@ export default function ProjectsPage() {
     setRenamingId(null);
   }, [renamingId, renameDraft]);
 
+  const handleExport = useCallback(async (wf: WorkflowSummary) => {
+    setExportingId(wf.id);
+    try {
+      const full = await getWorkflow(wf.id);
+      await exportWorkflowToFile(full);
+    } catch {
+      alert('Failed to export workflow');
+    } finally {
+      setExportingId(null);
+    }
+  }, []);
+
+  const handleImportClick = useCallback(() => {
+    if (importing) return;
+    importInputRef.current?.click();
+  }, [importing]);
+
+  const handleImportFile = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      // Reset input so picking the same file twice still fires onChange.
+      e.target.value = '';
+      if (!file) return;
+
+      setImporting(true);
+      try {
+        const parsed = await readBlpwFile(file);
+        const wf = await createWorkflow({
+          name: parsed.name,
+          icon_id: parsed.icon_id,
+          icon_color: parsed.icon_color,
+          description: parsed.description,
+        });
+        await saveWorkflow(wf.id, {
+          name: parsed.name,
+          icon_id: parsed.icon_id,
+          icon_color: parsed.icon_color,
+          description: parsed.description,
+          data: parsed.data,
+        });
+        navigate(`/workflow/${wf.id}`);
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : 'Failed to import workflow';
+        alert(`Import failed: ${msg}`);
+      } finally {
+        setImporting(false);
+      }
+    },
+    [navigate],
+  );
+
   return (
     <div className="projects-page">
       <div className="projects-header">
         <h1 className="projects-title">Projects</h1>
-        <button className="projects-new-btn" onClick={() => setCreateOpen(true)}>
-          + New Workflow
-        </button>
+        <div className="projects-header-actions">
+          <button
+            type="button"
+            className="projects-import-btn"
+            onClick={handleImportClick}
+            disabled={importing}
+            title={`Import a ${BLPW_EXTENSION} workflow file`}
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+            <span>{importing ? 'Importing…' : 'Import'}</span>
+          </button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept={`${BLPW_EXTENSION},application/json`}
+            style={{ display: 'none' }}
+            onChange={handleImportFile}
+          />
+          <button className="projects-new-btn" onClick={() => setCreateOpen(true)}>
+            + New Workflow
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -101,7 +202,8 @@ export default function ProjectsPage() {
         <div className="projects-empty">
           <p>No workflows yet.</p>
           <p>
-            Click <strong>+ New Workflow</strong> to get started.
+            Click <strong>+ New Workflow</strong> to get started, or{' '}
+            <strong>Import</strong> a <code>{BLPW_EXTENSION}</code> file.
           </p>
         </div>
       ) : (
@@ -146,6 +248,28 @@ export default function ProjectsPage() {
               <div className="workflow-card-meta">{timeAgo(wf.updated_at)}</div>
 
               <div className="workflow-card-actions" onClick={(e) => e.stopPropagation()}>
+                <button
+                  className="workflow-card-btn export"
+                  title={`Export as ${BLPW_EXTENSION}`}
+                  disabled={exportingId === wf.id}
+                  onClick={() => handleExport(wf)}
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden
+                  >
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" y1="15" x2="12" y2="3" />
+                  </svg>
+                </button>
                 <button
                   className="workflow-card-btn details"
                   title="Details"

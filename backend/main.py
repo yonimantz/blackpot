@@ -5,19 +5,31 @@ import base64
 import uuid
 from typing import Optional
 
-from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+# Use the OS native trust store (Windows cert store, macOS Keychain, etc.) for
+# Python's HTTPS so corporate TLS-intercepting proxies don't break outbound
+# requests (e.g. AI model APIs). Must run before any module that creates an
+# SSLContext.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
 
-import auth_firebase
-import database as db
-from engine import run_workflow, run_workflow_streaming, request_cancel
-from persistence import get_persistence
-from request_context import RunContext, reset_run_context, set_run_context
+from dotenv import load_dotenv
 
 load_dotenv()
+
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel
+
+import database as db
+from engine import run_workflow, run_workflow_streaming, request_cancel
+from nodes.io_nodes import export_images
+from nodes.tool_nodes import run_remove_bg_raw
+from persistence import get_persistence
+from request_context import RunContext, reset_run_context, set_run_context
 
 app = FastAPI(title="Blackpot API")
 
@@ -35,48 +47,18 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-def _persistence_owner(user: dict | None) -> str:
-    if user and user.get('uid'):
-        return user['uid']
-    return db.LEGACY_OWNER_SENTINEL
-
-
-def _user_gemini_key(store, user: dict | None) -> str | None:
-    if not user or not user.get('uid'):
-        return None
-    return store.get_user_gemini_key(user['uid'])
-
-
-def _user_openai_key(store, user: dict | None) -> str | None:
-    if not user or not user.get('uid'):
-        return None
-    return store.get_user_openai_key(user['uid'])
-
-
-async def require_user(authorization: str | None = Header(None)) -> dict | None:
-    if not auth_firebase.auth_enabled():
-        return None
-    if not authorization or not authorization.startswith('Bearer '):
-        raise HTTPException(status_code=401, detail='Not authenticated')
-    token = authorization[7:].strip()
-    try:
-        return await asyncio.to_thread(auth_firebase.verify_id_token, token)
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
-    except Exception:
-        raise HTTPException(status_code=401, detail='Invalid or expired session') from None
+_LOCAL_USER_ID = '__local__'
+_PERSISTENCE_OWNER = db.LEGACY_OWNER_SENTINEL
 
 
 @app.on_event('startup')
 def on_startup():
     db.init_db()
-    _fb_data = os.getenv('DATA_BACKEND', '').strip().lower() == 'firestore'
-    if _fb_data and not auth_firebase.auth_enabled():
-        raise RuntimeError(
-            'DATA_BACKEND=firestore requires FIREBASE_PROJECT_ID (Firebase Auth must be enabled).',
-        )
-    if auth_firebase.auth_enabled() or _fb_data:
-        auth_firebase.ensure_firebase_initialized()
+    # Reclaim space from image blobs that the client migrates out of the graph.
+    try:
+        db.vacuum_if_bloated()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -89,20 +71,28 @@ class WorkflowPayload(BaseModel):
     workflow_id: Optional[str] = None
 
 
-def _run_context_for_user(user: dict | None) -> RunContext:
+class RemoveBgToolPayload(BaseModel):
+    imageDataUrl: str
+    model: str = 'isnet-general-use'
+    alphaMatting: bool = False
+    fgThreshold: int = 240
+    bgThreshold: int = 10
+    erodeSize: int = 10
+
+
+def _run_context_for_user() -> RunContext:
     store = get_persistence()
-    owner_uid = user['uid'] if user else None
-    gkey = _user_gemini_key(store, user)
-    okey = _user_openai_key(store, user)
-    return RunContext(owner_uid=owner_uid, gemini_user_key=gkey, openai_user_key=okey)
+    return RunContext(
+        owner_uid=None,
+        gemini_user_key=store.get_user_gemini_key(_LOCAL_USER_ID),
+        openai_user_key=store.get_user_openai_key(_LOCAL_USER_ID),
+        fal_user_key=store.get_user_fal_key(_LOCAL_USER_ID),
+    )
 
 
 @app.post('/api/run')
-async def api_run_workflow(
-    payload: WorkflowPayload,
-    user: dict | None = Depends(require_user),
-):
-    tok = set_run_context(_run_context_for_user(user))
+async def api_run_workflow(payload: WorkflowPayload):
+    tok = set_run_context(_run_context_for_user())
     try:
         results = await run_workflow(payload.model_dump())
     except Exception as e:
@@ -116,17 +106,14 @@ async def api_run_workflow(
 
 
 @app.post('/api/run/stream')
-async def api_run_workflow_stream(
-    payload: WorkflowPayload,
-    user: dict | None = Depends(require_user),
-):
+async def api_run_workflow_stream(payload: WorkflowPayload):
     queue: asyncio.Queue = asyncio.Queue()
 
     async def progress_callback(event_type: str, data: dict):
         await queue.put((event_type, data))
 
     async def generate():
-        tok = set_run_context(_run_context_for_user(user))
+        tok = set_run_context(_run_context_for_user())
         task = asyncio.create_task(
             run_workflow_streaming(payload.model_dump(), progress_callback)
         )
@@ -159,24 +146,42 @@ async def api_run_workflow_stream(
 
 
 @app.post('/api/run/cancel')
-async def api_cancel_workflow(user: dict | None = Depends(require_user)):
+async def api_cancel_workflow():
     request_cancel()
     return {'status': 'cancelled'}
 
 
+class ExportImageItem(BaseModel):
+    image: str
+    fileName: str = 'output'
+    format: str = 'png'
+
+
+class ExportImagesPayload(BaseModel):
+    items: list[ExportImageItem]
+    exportPath: str = ''
+
+
+@app.post('/api/export')
+async def api_export_images(payload: ExportImagesPayload):
+    if not payload.items:
+        raise HTTPException(status_code=400, detail='No images to export')
+    try:
+        result = export_images(
+            [item.model_dump() for item in payload.items],
+            payload.exportPath,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f'export failed: {e}')
+    return result
+
+
 @app.post('/api/upload')
-async def api_upload_file(
-    file: UploadFile = File(...),
-    user: dict | None = Depends(require_user),
-):
+async def api_upload_file(file: UploadFile = File(...)):
     contents = await file.read()
     file_id = str(uuid.uuid4())
     ext = file.filename.split('.')[-1] if file.filename else 'png'
-    owner = _persistence_owner(user)
-    sub = owner if owner != db.LEGACY_OWNER_SENTINEL else ''
-    dest_dir = os.path.join(UPLOAD_DIR, sub) if sub else UPLOAD_DIR
-    os.makedirs(dest_dir, exist_ok=True)
-    path = os.path.join(dest_dir, f'{file_id}.{ext}')
+    path = os.path.join(UPLOAD_DIR, f'{file_id}.{ext}')
     with open(path, 'wb') as f:
         f.write(contents)
 
@@ -186,15 +191,61 @@ async def api_upload_file(
     return {'fileId': file_id, 'dataUrl': data_url}
 
 
+def _find_upload_path(file_id: str) -> str | None:
+    """Locate an uploaded file by id (the on-disk name is `{id}.{ext}`)."""
+    safe = os.path.basename(file_id or '')
+    if not safe:
+        return None
+    try:
+        for fn in os.listdir(UPLOAD_DIR):
+            if fn.split('.', 1)[0] == safe:
+                return os.path.join(UPLOAD_DIR, fn)
+    except FileNotFoundError:
+        return None
+    return None
+
+
+@app.get('/api/upload/{file_id}')
+async def api_get_upload_file(file_id: str):
+    path = _find_upload_path(file_id)
+    if not path or not os.path.exists(path):
+        return JSONResponse(status_code=404, content={'detail': 'Upload not found'})
+    ext = path.rsplit('.', 1)[-1].lower() if '.' in path else 'png'
+    mime = 'image/png'
+    if ext in ('jpg', 'jpeg'):
+        mime = 'image/jpeg'
+    elif ext == 'webp':
+        mime = 'image/webp'
+    elif ext == 'gif':
+        mime = 'image/gif'
+    with open(path, 'rb') as f:
+        raw = f.read()
+    return Response(content=raw, media_type=mime, headers={'Cache-Control': 'max-age=31536000'})
+
+
+@app.post('/api/tools/remove-bg')
+async def api_tool_remove_bg(payload: RemoveBgToolPayload):
+    image_data = (payload.imageDataUrl or '').strip()
+    if not image_data:
+        raise HTTPException(status_code=400, detail='imageDataUrl is required')
+    try:
+        return run_remove_bg_raw(
+            image_data,
+            {
+                'model': payload.model,
+                'alphaMatting': payload.alphaMatting,
+                'fgThreshold': payload.fgThreshold,
+                'bgThreshold': payload.bgThreshold,
+                'erodeSize': payload.erodeSize,
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f'remove-bg failed: {e}')
+
+
 @app.get('/api/health')
 async def health():
     return {'status': 'ok'}
-
-
-@app.get('/api/session')
-async def api_session(user: dict | None = Depends(require_user)):
-    """Verify the bearer token and invite allowlist; used by the SPA right after Firebase sign-in."""
-    return {'uid': user['uid'], 'email': user.get('email')}
 
 
 # ---------------------------------------------------------------------------
@@ -206,41 +257,26 @@ class GeminiKeyPayload(BaseModel):
 
 
 @app.get('/api/user/gemini-key')
-async def api_gemini_key_status(user: dict | None = Depends(require_user)):
-    if not user:
-        return {
-            'hasKey': bool(os.getenv('GEMINI_API_KEY', '').strip()),
-            'managedByEnv': True,
-        }
+async def api_gemini_key_status():
     store = get_persistence()
-    k = store.get_user_gemini_key(user['uid'])
+    k = store.get_user_gemini_key(_LOCAL_USER_ID)
     return {'hasKey': bool(k and k.strip()), 'managedByEnv': False}
 
 
 @app.put('/api/user/gemini-key')
-async def api_set_gemini_key(
-    payload: GeminiKeyPayload,
-    user: dict | None = Depends(require_user),
-):
-    if not user:
-        raise HTTPException(
-            status_code=400,
-            detail='Sign in is required to save a personal API key.',
-        )
+async def api_set_gemini_key(payload: GeminiKeyPayload):
     key = (payload.apiKey or '').strip()
     if not key:
         raise HTTPException(status_code=400, detail='apiKey is required')
     store = get_persistence()
-    store.set_user_gemini_key(user['uid'], key)
+    store.set_user_gemini_key(_LOCAL_USER_ID, key)
     return {'ok': True}
 
 
 @app.delete('/api/user/gemini-key')
-async def api_clear_gemini_key(user: dict | None = Depends(require_user)):
-    if not user:
-        raise HTTPException(status_code=400, detail='Sign in required')
+async def api_clear_gemini_key():
     store = get_persistence()
-    store.clear_user_gemini_key(user['uid'])
+    store.clear_user_gemini_key(_LOCAL_USER_ID)
     return {'ok': True}
 
 
@@ -254,41 +290,59 @@ class OpenAIKeyPayload(BaseModel):
 
 
 @app.get('/api/user/openai-key')
-async def api_openai_key_status(user: dict | None = Depends(require_user)):
-    if not user:
-        return {
-            'hasKey': bool(os.getenv('OPENAI_API_KEY', '').strip()),
-            'managedByEnv': True,
-        }
+async def api_openai_key_status():
     store = get_persistence()
-    k = store.get_user_openai_key(user['uid'])
+    k = store.get_user_openai_key(_LOCAL_USER_ID)
     return {'hasKey': bool(k and k.strip()), 'managedByEnv': False}
 
 
 @app.put('/api/user/openai-key')
-async def api_set_openai_key(
-    payload: OpenAIKeyPayload,
-    user: dict | None = Depends(require_user),
-):
-    if not user:
-        raise HTTPException(
-            status_code=400,
-            detail='Sign in is required to save a personal API key.',
-        )
+async def api_set_openai_key(payload: OpenAIKeyPayload):
     key = (payload.apiKey or '').strip()
     if not key:
         raise HTTPException(status_code=400, detail='apiKey is required')
     store = get_persistence()
-    store.set_user_openai_key(user['uid'], key)
+    store.set_user_openai_key(_LOCAL_USER_ID, key)
     return {'ok': True}
 
 
 @app.delete('/api/user/openai-key')
-async def api_clear_openai_key(user: dict | None = Depends(require_user)):
-    if not user:
-        raise HTTPException(status_code=400, detail='Sign in required')
+async def api_clear_openai_key():
     store = get_persistence()
-    store.clear_user_openai_key(user['uid'])
+    store.clear_user_openai_key(_LOCAL_USER_ID)
+    return {'ok': True}
+
+
+# ---------------------------------------------------------------------------
+# User settings (fal.ai API key)
+# ---------------------------------------------------------------------------
+
+
+class FalKeyPayload(BaseModel):
+    apiKey: str
+
+
+@app.get('/api/user/fal-key')
+async def api_fal_key_status():
+    store = get_persistence()
+    k = store.get_user_fal_key(_LOCAL_USER_ID)
+    return {'hasKey': bool(k and k.strip()), 'managedByEnv': False}
+
+
+@app.put('/api/user/fal-key')
+async def api_set_fal_key(payload: FalKeyPayload):
+    key = (payload.apiKey or '').strip()
+    if not key:
+        raise HTTPException(status_code=400, detail='apiKey is required')
+    store = get_persistence()
+    store.set_user_fal_key(_LOCAL_USER_ID, key)
+    return {'ok': True}
+
+
+@app.delete('/api/user/fal-key')
+async def api_clear_fal_key():
+    store = get_persistence()
+    store.clear_user_fal_key(_LOCAL_USER_ID)
     return {'ok': True}
 
 
@@ -312,19 +366,16 @@ class WorkflowUpdatePayload(BaseModel):
 
 
 @app.get('/api/workflows')
-async def api_list_workflows(user: dict | None = Depends(require_user)):
+async def api_list_workflows():
     store = get_persistence()
-    return store.list_workflows(_persistence_owner(user))
+    return store.list_workflows(_PERSISTENCE_OWNER)
 
 
 @app.post('/api/workflows')
-async def api_create_workflow(
-    payload: WorkflowCreatePayload,
-    user: dict | None = Depends(require_user),
-):
+async def api_create_workflow(payload: WorkflowCreatePayload):
     store = get_persistence()
     return store.create_workflow(
-        _persistence_owner(user),
+        _PERSISTENCE_OWNER,
         payload.name or 'Untitled Workflow',
         icon_id=payload.icon_id,
         description=payload.description,
@@ -333,27 +384,23 @@ async def api_create_workflow(
 
 
 @app.get('/api/workflows/{wf_id}')
-async def api_get_workflow(wf_id: str, user: dict | None = Depends(require_user)):
+async def api_get_workflow(wf_id: str):
     store = get_persistence()
-    wf = store.get_workflow(_persistence_owner(user), wf_id)
+    wf = store.get_workflow(_PERSISTENCE_OWNER, wf_id)
     if not wf:
         return JSONResponse(status_code=404, content={'detail': 'Workflow not found'})
     return wf
 
 
 @app.put('/api/workflows/{wf_id}')
-async def api_update_workflow(
-    wf_id: str,
-    payload: WorkflowUpdatePayload,
-    user: dict | None = Depends(require_user),
-):
+async def api_update_workflow(wf_id: str, payload: WorkflowUpdatePayload):
     store = get_persistence()
     icon_color_arg: str | None | object = db.ICON_COLOR_UNSET
     if 'icon_color' in payload.model_fields_set:
         icon_color_arg = payload.icon_color
 
     result = store.update_workflow(
-        _persistence_owner(user),
+        _PERSISTENCE_OWNER,
         wf_id,
         name=payload.name,
         data=payload.data,
@@ -367,9 +414,9 @@ async def api_update_workflow(
 
 
 @app.delete('/api/workflows/{wf_id}')
-async def api_delete_workflow(wf_id: str, user: dict | None = Depends(require_user)):
+async def api_delete_workflow(wf_id: str):
     store = get_persistence()
-    if not store.delete_workflow(_persistence_owner(user), wf_id):
+    if not store.delete_workflow(_PERSISTENCE_OWNER, wf_id):
         return JSONResponse(status_code=404, content={'detail': 'Workflow not found'})
     return {'status': 'deleted'}
 
@@ -394,40 +441,31 @@ class CollectionMoveBody(BaseModel):
 @app.get('/api/collection')
 async def api_list_collection(
     folder_id: Optional[str] = Query(None, description='Omit or empty = ALL (unfiled); UUID = that folder'),
-    user: dict | None = Depends(require_user),
 ):
     store = get_persistence()
-    owner = _persistence_owner(user)
     fid = (folder_id or '').strip() or None
     if fid:
-        if not store.get_collection_folder(owner, fid):
+        if not store.get_collection_folder(_PERSISTENCE_OWNER, fid):
             return JSONResponse(status_code=404, content={'detail': 'Folder not found'})
-    return store.list_collection(owner, fid)
+    return store.list_collection(_PERSISTENCE_OWNER, fid)
 
 
 @app.get('/api/collection/folders')
-async def api_list_collection_folders(user: dict | None = Depends(require_user)):
+async def api_list_collection_folders():
     store = get_persistence()
-    return store.list_collection_folders(_persistence_owner(user))
+    return store.list_collection_folders(_PERSISTENCE_OWNER)
 
 
 @app.post('/api/collection/folders')
-async def api_create_collection_folder(
-    body: CollectionFolderCreateBody,
-    user: dict | None = Depends(require_user),
-):
+async def api_create_collection_folder(body: CollectionFolderCreateBody):
     store = get_persistence()
-    return store.create_collection_folder(_persistence_owner(user), body.name)
+    return store.create_collection_folder(_PERSISTENCE_OWNER, body.name)
 
 
 @app.patch('/api/collection/folders/{folder_id}')
-async def api_rename_collection_folder(
-    folder_id: str,
-    body: CollectionFolderRenameBody,
-    user: dict | None = Depends(require_user),
-):
+async def api_rename_collection_folder(folder_id: str, body: CollectionFolderRenameBody):
     store = get_persistence()
-    result = store.rename_collection_folder(_persistence_owner(user), folder_id, body.name)
+    result = store.rename_collection_folder(_PERSISTENCE_OWNER, folder_id, body.name)
     if not result:
         return JSONResponse(status_code=404, content={'detail': 'Folder not found'})
     return result
@@ -437,7 +475,6 @@ async def api_rename_collection_folder(
 async def api_delete_collection_folder(
     folder_id: str,
     mode: str = Query('unlink', description='unlink | delete_items'),
-    user: dict | None = Depends(require_user),
 ):
     if mode not in ('unlink', 'delete_items'):
         return JSONResponse(
@@ -445,48 +482,43 @@ async def api_delete_collection_folder(
             content={'detail': "mode must be 'unlink' or 'delete_items'"},
         )
     store = get_persistence()
-    owner = _persistence_owner(user)
     if mode == 'unlink':
-        ok = store.delete_collection_folder_unlink(owner, folder_id)
+        ok = store.delete_collection_folder_unlink(_PERSISTENCE_OWNER, folder_id)
     else:
-        ok = store.delete_collection_folder_and_items(owner, folder_id)
+        ok = store.delete_collection_folder_and_items(_PERSISTENCE_OWNER, folder_id)
     if not ok:
         return JSONResponse(status_code=404, content={'detail': 'Folder not found'})
     return {'status': 'deleted'}
 
 
 @app.patch('/api/collection/move')
-async def api_collection_move(
-    body: CollectionMoveBody,
-    user: dict | None = Depends(require_user),
-):
+async def api_collection_move(body: CollectionMoveBody):
     store = get_persistence()
-    owner = _persistence_owner(user)
     if not body.ids:
         return JSONResponse(status_code=400, content={'detail': 'ids required'})
     target = body.folder_id
     if target is not None:
         target = target.strip() or None
-    if target and not store.get_collection_folder(owner, target):
+    if target and not store.get_collection_folder(_PERSISTENCE_OWNER, target):
         return JSONResponse(status_code=404, content={'detail': 'Folder not found'})
-    ok = store.set_collection_items_folder(owner, body.ids, target)
+    ok = store.set_collection_items_folder(_PERSISTENCE_OWNER, body.ids, target)
     if not ok:
         return JSONResponse(status_code=404, content={'detail': 'Folder not found'})
     return {'status': 'ok'}
 
 
 @app.delete('/api/collection/{img_id}')
-async def api_delete_collection_item(img_id: str, user: dict | None = Depends(require_user)):
+async def api_delete_collection_item(img_id: str):
     store = get_persistence()
-    if not store.delete_collection_item(_persistence_owner(user), img_id):
+    if not store.delete_collection_item(_PERSISTENCE_OWNER, img_id):
         return JSONResponse(status_code=404, content={'detail': 'Image not found'})
     return {'status': 'deleted'}
 
 
 @app.get('/api/collection/{img_id}/file')
-async def api_get_collection_file(img_id: str, user: dict | None = Depends(require_user)):
+async def api_get_collection_file(img_id: str):
     store = get_persistence()
-    blob = store.get_collection_bytes(_persistence_owner(user), img_id)
+    blob = store.get_collection_bytes(_PERSISTENCE_OWNER, img_id)
     if not blob:
         return JSONResponse(status_code=404, content={'detail': 'Image file not found'})
     raw, mime = blob

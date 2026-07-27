@@ -1,26 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
+import { getConnectedImageDataUrl } from '../utils/upstreamImage';
 
 function _getConnectedImageSrc(
   nodeId: string,
   handleId: string,
-  edges: { source: string; target: string; targetHandle?: string | null }[],
+  edges: { source: string; sourceHandle?: string | null; target: string; targetHandle?: string | null }[],
   allNodes: { id: string; data?: Record<string, any> }[],
 ): string | null {
-  const edge = edges.find((e) => e.target === nodeId && e.targetHandle === handleId);
-  if (!edge) return null;
-  const sourceNode = allNodes.find((n) => n.id === edge.source);
-  if (!sourceNode) return null;
-  const d = sourceNode.data;
-  return (
-    d?.fileData ||
-    d?._result?.image ||
-    d?.previewData ||
-    d?._editorPreview ||
-    d?._compositorPreview ||
-    d?._vignettePreview ||
-    null
-  );
+  return getConnectedImageDataUrl(nodeId, handleId, edges, allNodes);
 }
 
 const HANDLE_ANCHORS: Record<string, { lx: number; ly: number; sw: boolean; sh: boolean }> = {
@@ -60,12 +48,14 @@ export default function EditorCanvasPreview({
   nodeId,
   data,
   maxPreviewWidth = 252,
+  maxPreviewHeight = 560,
   disabled = false,
   className,
 }: {
   nodeId: string;
   data: Record<string, any>;
   maxPreviewWidth?: number;
+  maxPreviewHeight?: number;
   disabled?: boolean;
   className?: string;
 }) {
@@ -76,6 +66,7 @@ export default function EditorCanvasPreview({
 
   const layerCount = (data.layerCount as number) || 0;
   const layers = (data.layers as Record<string, any>) || {};
+  const bgHidden = Boolean(data.bgHidden);
 
   const [selectedLayer, _setSel] = useState<number | null>(null);
   const selRef = useRef<number | null>(null);
@@ -163,9 +154,14 @@ export default function EditorCanvasPreview({
       if (!ctx) return;
       const bgImg = images.bgLayer;
       const mw = Math.max(80, maxPreviewWidth);
+      const mh = Math.max(80, maxPreviewHeight);
       if (!bgImg) {
-        const ew = mw;
-        const eh = Math.round((mw * 160) / 252);
+        let ew = mw;
+        let eh = Math.round((mw * 160) / 252);
+        if (eh > mh) {
+          eh = mh;
+          ew = Math.round((mh * 252) / 160);
+        }
         canvas.width = ew;
         canvas.height = eh;
         ctx.fillStyle = '#1e1e21';
@@ -176,23 +172,30 @@ export default function EditorCanvasPreview({
         ctx.fillText('Connect a BG Layer', ew / 2, eh / 2 + 4);
         return;
       }
-      const s = Math.min(1, mw / bgImg.naturalWidth);
+      const s = Math.min(1, mw / bgImg.naturalWidth, mh / bgImg.naturalHeight);
       scaleRef.current = s;
       const cw = Math.round(bgImg.naturalWidth * s);
       const ch = Math.round(bgImg.naturalHeight * s);
       canvas.width = cw;
       canvas.height = ch;
-      ctx.drawImage(bgImg, 0, 0, cw, ch);
+      if (bgHidden) {
+        ctx.clearRect(0, 0, cw, ch);
+      } else {
+        ctx.drawImage(bgImg, 0, 0, cw, ch);
+      }
 
       for (let i = 1; i <= layerCount; i++) {
         const key = `layer${i}`;
         const img = images[key];
         if (!img) continue;
         const cfg = lc[key] || { x: 0, y: 0, width: 0, height: 0, rotation: 0, flipH: false };
+        if (cfg.hidden) continue;
         const w = cfg.width > 0 ? cfg.width : img.naturalWidth;
         const h = cfg.height > 0 ? cfg.height : img.naturalHeight;
         const rad = ((cfg.rotation || 0) * Math.PI) / 180;
+        const opacity = Math.max(0, Math.min(1, Number(cfg.opacity ?? 1)));
         ctx.save();
+        ctx.globalAlpha = opacity;
         ctx.translate(cfg.x * s, cfg.y * s);
         ctx.rotate(rad);
         if (cfg.flipH) ctx.scale(-1, 1);
@@ -204,66 +207,68 @@ export default function EditorCanvasPreview({
         const key = `layer${sel}`;
         const img = images[key]!;
         const cfg = lc[key] || { x: 0, y: 0, width: 0, height: 0, rotation: 0, flipH: false };
-        const w = cfg.width > 0 ? cfg.width : img.naturalWidth;
-        const h = cfg.height > 0 ? cfg.height : img.naturalHeight;
-        const corners = _getLayerCorners(cfg, w, h, s);
-        const rad = ((cfg.rotation || 0) * Math.PI) / 180;
+        if (!cfg.hidden) {
+          const w = cfg.width > 0 ? cfg.width : img.naturalWidth;
+          const h = cfg.height > 0 ? cfg.height : img.naturalHeight;
+          const corners = _getLayerCorners(cfg, w, h, s);
+          const rad = ((cfg.rotation || 0) * Math.PI) / 180;
 
-        ctx.save();
-        ctx.strokeStyle = '#6366f1';
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath();
-        ctx.moveTo(corners[0].x, corners[0].y);
-        for (let j = 1; j < 4; j++) ctx.lineTo(corners[j].x, corners[j].y);
-        ctx.closePath();
-        ctx.stroke();
-        ctx.setLineDash([]);
+          ctx.save();
+          ctx.strokeStyle = '#6366f1';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 3]);
+          ctx.beginPath();
+          ctx.moveTo(corners[0].x, corners[0].y);
+          for (let j = 1; j < 4; j++) ctx.lineTo(corners[j].x, corners[j].y);
+          ctx.closePath();
+          ctx.stroke();
+          ctx.setLineDash([]);
 
-        const hs = 6;
-        ctx.fillStyle = '#fff';
-        ctx.strokeStyle = '#6366f1';
-        ctx.lineWidth = 1.5;
-        for (const c of corners) {
-          ctx.fillRect(c.x - hs / 2, c.y - hs / 2, hs, hs);
-          ctx.strokeRect(c.x - hs / 2, c.y - hs / 2, hs, hs);
+          const hs = 6;
+          ctx.fillStyle = '#fff';
+          ctx.strokeStyle = '#6366f1';
+          ctx.lineWidth = 1.5;
+          for (const c of corners) {
+            ctx.fillRect(c.x - hs / 2, c.y - hs / 2, hs, hs);
+            ctx.strokeRect(c.x - hs / 2, c.y - hs / 2, hs, hs);
+          }
+
+          const ehs = 4;
+          for (let j = 0; j < 4; j++) {
+            const n = (j + 1) % 4;
+            const mx = (corners[j].x + corners[n].x) / 2;
+            const my = (corners[j].y + corners[n].y) / 2;
+            ctx.fillRect(mx - ehs / 2, my - ehs / 2, ehs, ehs);
+            ctx.strokeRect(mx - ehs / 2, my - ehs / 2, ehs, ehs);
+          }
+
+          const topMid = { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
+          const rDist = 18;
+          const rh = { x: topMid.x + rDist * Math.sin(rad), y: topMid.y - rDist * Math.cos(rad) };
+          ctx.strokeStyle = '#6366f1';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(topMid.x, topMid.y);
+          ctx.lineTo(rh.x, rh.y);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(rh.x, rh.y, 5, 0, Math.PI * 2);
+          ctx.fillStyle = '#6366f1';
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(rh.x, rh.y, 3, -2.2, 1);
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+
+          ctx.restore();
         }
-
-        const ehs = 4;
-        for (let j = 0; j < 4; j++) {
-          const n = (j + 1) % 4;
-          const mx = (corners[j].x + corners[n].x) / 2;
-          const my = (corners[j].y + corners[n].y) / 2;
-          ctx.fillRect(mx - ehs / 2, my - ehs / 2, ehs, ehs);
-          ctx.strokeRect(mx - ehs / 2, my - ehs / 2, ehs, ehs);
-        }
-
-        const topMid = { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
-        const rDist = 18;
-        const rh = { x: topMid.x + rDist * Math.sin(rad), y: topMid.y - rDist * Math.cos(rad) };
-        ctx.strokeStyle = '#6366f1';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(topMid.x, topMid.y);
-        ctx.lineTo(rh.x, rh.y);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(rh.x, rh.y, 5, 0, Math.PI * 2);
-        ctx.fillStyle = '#6366f1';
-        ctx.fill();
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(rh.x, rh.y, 3, -2.2, 1);
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-
-        ctx.restore();
       }
     },
-    [images, layerCount, maxPreviewWidth],
+    [images, layerCount, maxPreviewHeight, maxPreviewWidth, bgHidden],
   );
 
   useEffect(() => {
@@ -288,6 +293,7 @@ export default function EditorCanvasPreview({
       const img = images[key];
       if (!img) return false;
       const cfg = layers[key] || {};
+      if (cfg.hidden) return false;
       const s = scaleRef.current;
       const w = cfg.width > 0 ? cfg.width : img.naturalWidth;
       const h = cfg.height > 0 ? cfg.height : img.naturalHeight;
@@ -313,34 +319,36 @@ export default function EditorCanvasPreview({
         const key = `layer${sel}`;
         const img = images[key]!;
         const cfg = layers[key] || {};
-        const w = cfg.width > 0 ? cfg.width : img.naturalWidth;
-        const h = cfg.height > 0 ? cfg.height : img.naturalHeight;
-        const corners = _getLayerCorners(cfg, w, h, s);
-        const rad = ((cfg.rotation || 0) * Math.PI) / 180;
+        if (!cfg.hidden) {
+          const w = cfg.width > 0 ? cfg.width : img.naturalWidth;
+          const h = cfg.height > 0 ? cfg.height : img.naturalHeight;
+          const corners = _getLayerCorners(cfg, w, h, s);
+          const rad = ((cfg.rotation || 0) * Math.PI) / 180;
 
-        const topMid = { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
-        const rh = { x: topMid.x + 18 * Math.sin(rad), y: topMid.y - 18 * Math.cos(rad) };
-        if (near(x, y, rh.x, rh.y, 10)) {
-          startDrag('rotate', cfg, x, y);
-          return;
-        }
-
-        const cNames = ['scale-tl', 'scale-tr', 'scale-br', 'scale-bl'];
-        for (let j = 0; j < 4; j++) {
-          if (near(x, y, corners[j].x, corners[j].y)) {
-            startDrag(cNames[j], cfg, x, y);
+          const topMid = { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
+          const rh = { x: topMid.x + 18 * Math.sin(rad), y: topMid.y - 18 * Math.cos(rad) };
+          if (near(x, y, rh.x, rh.y, 10)) {
+            startDrag('rotate', cfg, x, y);
             return;
           }
-        }
 
-        const eNames = ['scale-t', 'scale-r', 'scale-b', 'scale-l'];
-        for (let j = 0; j < 4; j++) {
-          const n = (j + 1) % 4;
-          const mx = (corners[j].x + corners[n].x) / 2;
-          const my = (corners[j].y + corners[n].y) / 2;
-          if (near(x, y, mx, my)) {
-            startDrag(eNames[j], cfg, x, y);
-            return;
+          const cNames = ['scale-tl', 'scale-tr', 'scale-br', 'scale-bl'];
+          for (let j = 0; j < 4; j++) {
+            if (near(x, y, corners[j].x, corners[j].y)) {
+              startDrag(cNames[j], cfg, x, y);
+              return;
+            }
+          }
+
+          const eNames = ['scale-t', 'scale-r', 'scale-b', 'scale-l'];
+          for (let j = 0; j < 4; j++) {
+            const n = (j + 1) % 4;
+            const mx = (corners[j].x + corners[n].x) / 2;
+            const my = (corners[j].y + corners[n].y) / 2;
+            if (near(x, y, mx, my)) {
+              startDrag(eNames[j], cfg, x, y);
+              return;
+            }
           }
         }
       }
@@ -457,31 +465,33 @@ export default function EditorCanvasPreview({
         const key = `layer${sel}`;
         const img = images[key]!;
         const cfg = layers[key] || {};
-        const w = cfg.width > 0 ? cfg.width : img.naturalWidth;
-        const h = cfg.height > 0 ? cfg.height : img.naturalHeight;
-        const corners = _getLayerCorners(cfg, w, h, s);
-        const rad = ((cfg.rotation || 0) * Math.PI) / 180;
+        if (!cfg.hidden) {
+          const w = cfg.width > 0 ? cfg.width : img.naturalWidth;
+          const h = cfg.height > 0 ? cfg.height : img.naturalHeight;
+          const corners = _getLayerCorners(cfg, w, h, s);
+          const rad = ((cfg.rotation || 0) * Math.PI) / 180;
 
-        const topMid = { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
-        const rh = { x: topMid.x + 18 * Math.sin(rad), y: topMid.y - 18 * Math.cos(rad) };
-        if (near(x, y, rh.x, rh.y, 10)) {
-          canvas.style.cursor = 'grab';
-          return;
-        }
-
-        for (let j = 0; j < 4; j++) {
-          if (near(x, y, corners[j].x, corners[j].y)) {
-            canvas.style.cursor = j % 2 === 0 ? 'nwse-resize' : 'nesw-resize';
+          const topMid = { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
+          const rh = { x: topMid.x + 18 * Math.sin(rad), y: topMid.y - 18 * Math.cos(rad) };
+          if (near(x, y, rh.x, rh.y, 10)) {
+            canvas.style.cursor = 'grab';
             return;
           }
-        }
-        for (let j = 0; j < 4; j++) {
-          const n = (j + 1) % 4;
-          const mx = (corners[j].x + corners[n].x) / 2;
-          const my = (corners[j].y + corners[n].y) / 2;
-          if (near(x, y, mx, my)) {
-            canvas.style.cursor = j % 2 === 0 ? 'ns-resize' : 'ew-resize';
-            return;
+
+          for (let j = 0; j < 4; j++) {
+            if (near(x, y, corners[j].x, corners[j].y)) {
+              canvas.style.cursor = j % 2 === 0 ? 'nwse-resize' : 'nesw-resize';
+              return;
+            }
+          }
+          for (let j = 0; j < 4; j++) {
+            const n = (j + 1) % 4;
+            const mx = (corners[j].x + corners[n].x) / 2;
+            const my = (corners[j].y + corners[n].y) / 2;
+            if (near(x, y, mx, my)) {
+              canvas.style.cursor = j % 2 === 0 ? 'ns-resize' : 'ew-resize';
+              return;
+            }
           }
         }
       }
@@ -500,13 +510,25 @@ export default function EditorCanvasPreview({
   const canvasClass =
     [className || 'editor-canvas-preview editor-canvas-interactive'].filter(Boolean).join(' ');
 
+  const showAlphaBackdrop = Boolean(bgHidden && images.bgLayer);
+
   return (
-    <canvas
-      ref={canvasRef}
-      className={canvasClass}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleHover}
-      style={disabled ? { cursor: 'not-allowed' } : undefined}
-    />
+    <div
+      className={showAlphaBackdrop ? 'editor-canvas-alpha-wrap' : undefined}
+      style={showAlphaBackdrop ? { display: 'inline-block', lineHeight: 0 } : undefined}
+    >
+      <canvas
+        ref={canvasRef}
+        className={canvasClass}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleHover}
+        style={{
+          maxWidth: '100%',
+          maxHeight: '100%',
+          verticalAlign: 'top',
+          ...(disabled ? { cursor: 'not-allowed' } : {}),
+        }}
+      />
+    </div>
   );
 }

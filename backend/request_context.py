@@ -9,6 +9,7 @@ class RunContext:
     owner_uid: str | None = None
     gemini_user_key: str | None = None
     openai_user_key: str | None = None
+    fal_user_key: str | None = None
 
 
 _run_ctx: ContextVar[RunContext | None] = ContextVar('run_ctx', default=None)

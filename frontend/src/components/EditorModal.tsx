@@ -20,7 +20,11 @@ export default function EditorModal({
 
   if (!open || !node) return null;
 
-  const maxPreviewWidth = Math.min(960, Math.max(200, window.innerWidth - 120 - 260));
+  const maxPreviewWidth = Math.min(960, Math.max(200, window.innerWidth - 120 - 280));
+  const maxPreviewHeight = Math.max(
+    180,
+    Math.floor(window.innerHeight * 0.92 - 168),
+  );
 
   return (
     <div
@@ -30,7 +34,7 @@ export default function EditorModal({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="compositor-modal" role="dialog" aria-labelledby="editor-modal-title">
+      <div className="compositor-modal editor-modal" role="dialog" aria-labelledby="editor-modal-title">
         <div className="compositor-modal-header">
           <h2 id="editor-modal-title">Editor</h2>
           <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close">
@@ -55,8 +59,9 @@ export default function EditorModal({
               nodeId={nodeId}
               data={data}
               maxPreviewWidth={maxPreviewWidth}
+              maxPreviewHeight={maxPreviewHeight}
               disabled={isRunning}
-              className="compositor-modal-canvas editor-canvas-interactive"
+              className="compositor-modal-canvas editor-canvas-interactive editor-canvas-no-round"
             />
           </div>
         </div>

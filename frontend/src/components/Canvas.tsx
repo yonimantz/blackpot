@@ -6,15 +6,18 @@ import {
   MiniMap,
   SelectionMode,
 } from '@xyflow/react';
-import type { ReactFlowInstance, Edge, Connection, FinalConnectionState } from '@xyflow/react';
+import type { ReactFlowInstance, Edge, Connection, FinalConnectionState, NodeChange } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useWorkflowStore, findGroupIdForNode } from '../store/workflowStore';
+import { buildImportImageData } from '../utils/importImageData';
 import { nodeTypes } from '../nodes/nodeRegistry';
 import {
   NODE_TYPE_DEFINITIONS,
   NODE_CATEGORIES,
   getNodeInputs,
+  getNodeOutputs,
   getNodeTypesConnectableFromWireOrigin,
+  isNodeTypePinnable,
   type PortType,
 } from '../types/nodeTypes';
 import NodeGroups from './NodeGroups';
@@ -51,15 +54,6 @@ function isRasterImageFile(file: File): boolean {
   return /\.(png|jpe?g)$/i.test(file.name);
 }
 
-function readFileAsDataURL(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-}
-
 function FocusModeCanvasChip() {
   const focusedGroupId = useWorkflowStore((s) => s.focusedGroupId);
   const groups = useWorkflowStore((s) => s.groups);
@@ -91,21 +85,23 @@ function FocusModeCanvasChip() {
 }
 
 export default function Canvas() {
-  const {
-    nodes,
-    edges,
-    onNodesChange,
-    onEdgesChange,
-    onConnect,
-    setSelectedNodeId,
-    addNode,
-    addNodeAndConnectFromHandle,
-    setBypassForNodeIds,
-    deleteSelectedElements,
-    removeEdgesByIds,
-    handleReconnect,
-    isRunning,
-  } = useWorkflowStore();
+  // Granular selectors so the canvas only re-renders when the data it actually
+  // passes to ReactFlow changes (nodes / edges / isRunning), not on every store
+  // tick (run progress, undo stack, dirty flag, etc.). Action references are
+  // stable in zustand, so selecting them never triggers a re-render.
+  const nodes = useWorkflowStore((s) => s.nodes);
+  const edges = useWorkflowStore((s) => s.edges);
+  const isRunning = useWorkflowStore((s) => s.isRunning);
+  const onNodesChange = useWorkflowStore((s) => s.onNodesChange);
+  const onEdgesChange = useWorkflowStore((s) => s.onEdgesChange);
+  const onConnect = useWorkflowStore((s) => s.onConnect);
+  const setSelectedNodeId = useWorkflowStore((s) => s.setSelectedNodeId);
+  const addNode = useWorkflowStore((s) => s.addNode);
+  const addNodeAndConnectFromHandle = useWorkflowStore((s) => s.addNodeAndConnectFromHandle);
+  const setBypassForNodeIds = useWorkflowStore((s) => s.setBypassForNodeIds);
+  const deleteSelectedElements = useWorkflowStore((s) => s.deleteSelectedElements);
+  const removeEdgesByIds = useWorkflowStore((s) => s.removeEdgesByIds);
+  const handleReconnect = useWorkflowStore((s) => s.handleReconnect);
 
   const reactFlowInstance = useRef<ReactFlowInstance | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -185,7 +181,20 @@ export default function Canvas() {
         void useWorkflowStore.getState().copySelectedNodes();
         return;
       }
-      if (e.ctrlKey && e.key === 'g') {
+      if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        const store = useWorkflowStore.getState();
+        const allNodes = store.nodes;
+        if (allNodes.length === 0) return;
+        const selectChanges: NodeChange[] = allNodes.map((n) => ({
+          type: 'select',
+          id: n.id,
+          selected: true,
+        }));
+        store.onNodesChange(selectChanges);
+        return;
+      }
+      if (mod && !e.altKey && e.key.toLowerCase() === 'g') {
         e.preventDefault();
         useWorkflowStore.getState().createGroupFromSelection();
       }
@@ -193,10 +202,10 @@ export default function Canvas() {
     const onKeyUp = (e: KeyboardEvent) => {
       if (e.key === 'Control') setCtrlHeld(false);
     };
-    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown, true);
     window.addEventListener('keyup', onKeyUp);
     return () => {
-      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keydown', onKeyDown, true);
       window.removeEventListener('keyup', onKeyUp);
     };
   }, []);
@@ -232,25 +241,20 @@ export default function Canvas() {
       const blob = imageItem.getAsFile();
       if (!blob) return;
 
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        const rf = reactFlowInstance.current;
-        const container = containerRef.current;
-        if (!rf || !container) return;
+      const rf = reactFlowInstance.current;
+      const container = containerRef.current;
+      if (!rf || !container) return;
 
-        const rect = container.getBoundingClientRect();
-        const position = rf.screenToFlowPosition({
-          x: rect.left + rect.width / 2,
-          y: rect.top + rect.height / 2,
-        });
+      const rect = container.getBoundingClientRect();
+      const position = rf.screenToFlowPosition({
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      });
 
-        addNode('importImage', position, {
-          fileData: dataUrl,
-          filePath: `clipboard-${Date.now()}.png`,
-        });
-      };
-      reader.readAsDataURL(blob);
+      void (async () => {
+        const overrides = await buildImportImageData(blob, `clipboard-${Date.now()}.png`);
+        addNode('importImage', position, overrides);
+      })();
     };
 
     window.addEventListener('paste', handlePaste);
@@ -360,6 +364,18 @@ export default function Canvas() {
   }, [isCutting, removeEdgesByIds, checkEdgesUnderPoint]);
 
   const handlePointerDownCapture = useCallback((e: React.PointerEvent) => {
+    // Clear any leftover browser text selection when starting an interaction on
+    // the canvas (but keep it if the user is clicking into an editing field).
+    if (e.button === 0) {
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      const editable =
+        tag === 'INPUT' || tag === 'TEXTAREA' || el?.isContentEditable;
+      if (!editable) {
+        const sel = window.getSelection();
+        if (sel && !sel.isCollapsed) sel.removeAllRanges();
+      }
+    }
     if (useWorkflowStore.getState().isRunning) return;
     if (e.ctrlKey && e.button === 0) {
       e.stopPropagation();
@@ -437,7 +453,9 @@ export default function Canvas() {
 
       let portType: PortType | undefined;
       if (fromHandle.type === 'source') {
-        portType = NODE_TYPE_DEFINITIONS[storeNode.type]?.outputs.find((p) => p.id === handleId)?.type;
+        portType = getNodeOutputs(storeNode.type, storeNode.data as Record<string, any>).find(
+          (p) => p.id === handleId,
+        )?.type;
       } else {
         portType = getNodeInputs(storeNode.type, storeNode.data).find((p) => p.id === handleId)?.type;
       }
@@ -501,13 +519,12 @@ export default function Canvas() {
 
       void (async () => {
         try {
-          const dataUrls = await Promise.all(files.map((f) => readFileAsDataURL(f)));
           const step = 50;
-          files.forEach((file, i) => {
-            addNode('importImage', { x: base.x + i * step, y: base.y + i * step }, {
-              fileData: dataUrls[i],
-              filePath: file.name,
-            });
+          const overrides = await Promise.all(
+            files.map((f) => buildImportImageData(f, f.name)),
+          );
+          files.forEach((_file, i) => {
+            addNode('importImage', { x: base.x + i * step, y: base.y + i * step }, overrides[i]);
           });
         } catch {
           /* ignore read errors */
@@ -580,6 +597,22 @@ export default function Canvas() {
           setBypassForNodeIds(targetIds, true);
         }
       }
+      if (event.key === 'p' || event.key === 'P') {
+        if (event.ctrlKey || event.metaKey) return;
+        let targetIds = nodes.filter((n) => n.selected).map((n) => n.id);
+        if (targetIds.length === 0 && selectedNodeId) targetIds = [selectedNodeId];
+        const pinnable = targetIds.filter((nid) =>
+          isNodeTypePinnable(nodes.find((n) => n.id === nid)?.type),
+        );
+        if (pinnable.length === 0) return;
+        event.preventDefault();
+        // Alt unpins; otherwise pin unless everything selected is already pinned.
+        const allPinned = pinnable.every(
+          (nid) => nodes.find((n) => n.id === nid)?.data.pinned,
+        );
+        store.setPinnedForNodeIds(pinnable, event.altKey ? false : !allPinned);
+        return;
+      }
       if (event.key === 'Delete' || event.key === 'Backspace') {
         deleteSelectedElements();
       }
@@ -623,7 +656,9 @@ export default function Canvas() {
     if (!storeNode?.type) return null;
     let portType: PortType | undefined;
     if (wd.handleType === 'source') {
-      portType = NODE_TYPE_DEFINITIONS[storeNode.type]?.outputs.find((p) => p.id === wd.handleId)?.type;
+      portType = getNodeOutputs(storeNode.type, storeNode.data as Record<string, any>).find(
+        (p) => p.id === wd.handleId,
+      )?.type;
     } else {
       portType = getNodeInputs(storeNode.type, storeNode.data).find((p) => p.id === wd.handleId)?.type;
     }

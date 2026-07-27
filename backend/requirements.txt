@@ -4,6 +4,8 @@ pillow
 httpx
 python-multipart
 numpy
+rembg[cpu]
 google-genai
+fal-client
 python-dotenv
-firebase-admin
+truststore

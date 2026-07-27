@@ -6,6 +6,7 @@ import type { NodeGroup } from '../store/workflowStore';
 
 const PADDING = 24;
 const HEADER_HEIGHT = 36;
+const GROUP_COLOR = '#8b5cf6';
 
 function getGroupBounds(
   group: NodeGroup,
@@ -69,7 +70,13 @@ function GroupBox({
   group: NodeGroup;
   onRequestDelete: () => void;
 }) {
-  const nodes = useWorkflowStore((s) => s.nodes);
+  // Subscribe to a serialized bounds string instead of the whole nodes array,
+  // so the box only re-renders when its own members actually move/resize — not
+  // on every box-select frame (which rebuilds the nodes array each tick).
+  const boundsKey = useWorkflowStore((s) => {
+    const b = getGroupBounds(group, s.nodes);
+    return b ? `${b.x}|${b.y}|${b.width}|${b.height}` : '';
+  });
   const ungroupNodes = useWorkflowStore((s) => s.ungroupNodes);
   const updateGroupName = useWorkflowStore((s) => s.updateGroupName);
   const moveGroupNodes = useWorkflowStore((s) => s.moveGroupNodes);
@@ -85,8 +92,9 @@ function GroupBox({
   const zoomRef = useRef(viewport.zoom);
   zoomRef.current = viewport.zoom;
 
-  const bounds = getGroupBounds(group, nodes);
-  if (!bounds) return null;
+  if (!boundsKey) return null;
+  const [bx, by, bw, bh] = boundsKey.split('|').map(Number);
+  const bounds = { x: bx, y: by, width: bw, height: bh };
 
   const handleStartEdit = useCallback(() => {
     setEditName(group.name);
@@ -133,13 +141,12 @@ function GroupBox({
         top: bounds.y,
         width: bounds.width,
         height: bounds.height,
-        borderColor: `${group.color}80`,
-        background: `${group.color}12`,
+        borderColor: `${GROUP_COLOR}80`,
       }}
     >
       <div
         className="node-group-header"
-        style={{ background: `${group.color}30` }}
+        style={{ background: `${GROUP_COLOR}30` }}
         onPointerDown={handleDragStart}
       >
         {editing ? (
