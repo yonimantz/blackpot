@@ -23,6 +23,19 @@ Double-click `run.bat`, or from the repo root:
 run.bat
 ```
 
+This is the development setup: the backend serves the API on port 8000 and Vite serves the UI on 5173 with hot reload.
+
+### Single-port mode
+
+The way an installed copy runs. The backend serves the built UI itself, so there is one process on one port:
+
+```bat
+cd frontend && npm run build
+cd ..\backend && python main.py --desktop
+```
+
+It picks port 8000, or the next free port if that one is taken, then opens your browser. Launching it again while it is already running just opens a tab pointing at the existing server instead of starting a second one. `SPOTON_PORT` changes which port it tries first.
+
 ### Backend (Python)
 
 ```bash

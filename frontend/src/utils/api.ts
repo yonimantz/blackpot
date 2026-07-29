@@ -19,8 +19,7 @@ async function waitForBackend(signal?: AbortSignal): Promise<void> {
     await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
   }
   throw new Error(
-    'Cannot reach backend server. Make sure the backend (FastAPI on port 8000) is running.\n' +
-      'Run "run.bat" or start the backend manually with: cd backend && python main.py',
+    'Cannot reach the SpotOn server. Close this tab and start SpotOn again.',
   );
 }
 

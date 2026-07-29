@@ -1,8 +1,12 @@
 import asyncio
 import json
+import ntpath
 import os
 import base64
+import sys
+import threading
 import uuid
+import webbrowser
 from typing import Optional
 
 # Use the OS native trust store (Windows cert store, macOS Keychain, etc.) for
@@ -17,7 +21,7 @@ except ImportError:
 
 from dotenv import load_dotenv
 
-from paths import BACKEND_DIR, ENV_FILE, UPLOAD_DIR
+from paths import APP_NAME, BACKEND_DIR, ENV_FILE, FRONTEND_DIST, UPLOAD_DIR
 
 # A .env beside the code only exists in a dev checkout and takes precedence; an
 # installed copy reads the one in the user's data directory. load_dotenv never
@@ -27,7 +31,7 @@ load_dotenv(ENV_FILE)
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 import database as db
@@ -248,7 +252,9 @@ async def api_tool_remove_bg(payload: RemoveBgToolPayload):
 
 @app.get('/api/health')
 async def health():
-    return {'status': 'ok'}
+    # The app name lets a second launch recognize an already-running SpotOn
+    # rather than mistaking any listener on the port for one.
+    return {'status': 'ok', 'app': APP_NAME}
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +534,132 @@ async def api_get_collection_file(img_id: str):
     return Response(content=raw, media_type=mime)
 
 
-if __name__ == '__main__':
+# ---------------------------------------------------------------------------
+# Frontend
+#
+# A packaged build serves the UI from this same server, so the installed app is
+# one process on one port. Registered last so it cannot shadow an API route.
+# ---------------------------------------------------------------------------
+
+if FRONTEND_DIST:
+    _INDEX_HTML = os.path.join(FRONTEND_DIST, 'index.html')
+
+    def _static_file(rel_path: str) -> str | None:
+        """Resolve a request path inside the dist folder, or None if it escapes
+        the folder or names something that is not a file."""
+        if os.path.isabs(rel_path) or ntpath.isabs(rel_path):
+            return None
+        candidate = os.path.normpath(os.path.join(FRONTEND_DIST, rel_path))
+        if os.path.commonpath((FRONTEND_DIST, candidate)) != FRONTEND_DIST:
+            return None
+        return candidate if os.path.isfile(candidate) else None
+
+    @app.get('/{asset_path:path}')
+    async def serve_frontend(asset_path: str):
+        if asset_path.startswith('api/'):
+            raise HTTPException(status_code=404, detail='Not Found')
+        found = _static_file(asset_path) if asset_path else None
+        if found:
+            return FileResponse(found)
+        # Unknown paths are client-side routes; let the SPA router handle them.
+        return FileResponse(_INDEX_HTML)
+
+
+# ---------------------------------------------------------------------------
+# Launcher
+# ---------------------------------------------------------------------------
+
+HOST = '127.0.0.1'
+DEFAULT_PORT = 8000
+_PORT_SEARCH_RANGE = 12
+
+
+def _is_listening(port: int) -> bool:
+    """Whether something accepts connections on *port*.
+
+    A successful bind is not proof the port is free: Windows lets a second
+    socket bind the same port when SO_REUSEADDR is set (uvicorn sets it), and
+    traffic then goes to whichever bound last. Connecting is the reliable test.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex((HOST, port)) == 0
+
+
+def _is_spoton(port: int) -> bool:
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f'http://{HOST}:{port}/api/health', timeout=1) as resp:
+            return _json.loads(resp.read()).get('app') == APP_NAME
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def _choose_port(preferred: int) -> tuple[int, bool]:
+    """Return the port to use and whether SpotOn is already serving there."""
+    for port in range(preferred, preferred + _PORT_SEARCH_RANGE):
+        if not _is_listening(port):
+            return port, False
+        if _is_spoton(port):
+            return port, True
+    raise SystemExit(
+        f'No free port found between {preferred} and {preferred + _PORT_SEARCH_RANGE - 1}.'
+    )
+
+
+def _open_browser_when_ready(url: str, port: int) -> None:
+    """Wait for the server to accept connections, then open the browser, so the
+    user never sees a connection-refused page."""
+    import time
+
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if _is_listening(port):
+            webbrowser.open(url)
+            return
+        time.sleep(0.2)
+
+
+def main() -> None:
     import uvicorn
 
-    uvicorn.run('main:app', host='0.0.0.0', port=8000, reload=True)
+    frozen = getattr(sys, 'frozen', False)
+    desktop = frozen or '--desktop' in sys.argv
+    preferred = int(os.getenv('SPOTON_PORT') or DEFAULT_PORT)
+
+    port, already_running = _choose_port(preferred)
+    url = f'http://{HOST}:{port}'
+
+    if already_running:
+        # Keep console output ASCII: a packaged build may run under a code page
+        # that cannot encode typographic characters.
+        print(f'{APP_NAME} is already running at {url} - opening it instead.')
+        webbrowser.open(url)
+        return
+
+    if desktop:
+        if not FRONTEND_DIST:
+            raise SystemExit(
+                'No built frontend found. Run "npm run build" in frontend/ first.'
+            )
+        threading.Thread(
+            target=_open_browser_when_ready, args=(url, port), daemon=True
+        ).start()
+        print(f'{APP_NAME} running at {url}')
+
+    uvicorn.run(
+        app if desktop else 'main:app',
+        host=HOST,
+        port=port,
+        reload=not desktop,
+        log_level='warning' if desktop else 'info',
+    )
+
+
+if __name__ == '__main__':
+    main()

@@ -40,6 +40,26 @@ def _resolve_data_dir() -> str:
 
 DATA_DIR = _resolve_data_dir()
 
+
+def _resolve_frontend_dist() -> str | None:
+    """Locate the built frontend, or None when only the API should be served.
+
+    A packaged build carries the UI inside the bundle; a dev checkout may have a
+    dist/ from ``npm run build``, but usually runs the Vite dev server instead
+    and leaves this unused.
+    """
+    candidates = []
+    if getattr(sys, 'frozen', False):
+        candidates.append(os.path.join(getattr(sys, '_MEIPASS', BACKEND_DIR), 'web'))
+    candidates.append(os.path.join(os.path.dirname(BACKEND_DIR), 'frontend', 'dist'))
+    for candidate in candidates:
+        if os.path.isfile(os.path.join(candidate, 'index.html')):
+            return candidate
+    return None
+
+
+FRONTEND_DIST = _resolve_frontend_dist()
+
 DB_PATH = os.path.join(DATA_DIR, 'spoton.db')
 COLLECTION_DIR = os.path.join(DATA_DIR, 'collection')
 UPLOAD_DIR = os.path.join(DATA_DIR, 'uploads')
