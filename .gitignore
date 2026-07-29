@@ -4,6 +4,8 @@ node_modules/
 # Build output
 frontend/dist/
 dist/
+packaging/build/
+packaging/SpotOn-icon-preview.png
 
 # Environment and secrets
 .env

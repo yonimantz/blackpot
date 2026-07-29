@@ -61,6 +61,19 @@ Runs at `http://localhost:5173`, proxying `/api` to the backend.
 
 Set `CORS_ORIGINS` in `backend/.env` to a comma-separated list of allowed origins if you change ports or run the frontend on a different host. The default `*` is fine for local use.
 
+## Building the Windows app
+
+```bat
+pip install -r packaging\requirements-build.txt
+packaging\build.bat
+```
+
+That builds the frontend, then packages it with the backend into `packaging\dist\SpotOn\SpotOn.exe` (~320 MB, one folder). The console window it opens is the app's on/off switch — closing it stops the server.
+
+The Remove Background model is not bundled. `rembg` downloads it (~168 MB) into `%USERPROFILE%\.u2net` the first time that node runs, which needs an internet connection but keeps the installer far smaller.
+
+`packaging\SpotOn.ico` is committed. Regenerate it with `python packaging\make_icon.py` only after changing the SVG mark or the colours in that script; it needs the two optional build dependencies.
+
 ## Local data
 
 Everything the app writes lives in `%APPDATA%\SpotOn` (never inside the program folder, so an installed copy works from a read-only location):

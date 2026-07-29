@@ -1,0 +1,7 @@
+# Build-time only. The app itself needs backend/requirements.txt.
+pyinstaller
+
+# Only needed to regenerate SpotOn.ico from the SVG mark (make_icon.py).
+# The .ico is committed, so a normal build does not need these.
+# svglib
+# rlPyCairo
