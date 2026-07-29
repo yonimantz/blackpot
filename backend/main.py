@@ -17,7 +17,13 @@ except ImportError:
 
 from dotenv import load_dotenv
 
-load_dotenv()
+from paths import BACKEND_DIR, ENV_FILE, UPLOAD_DIR
+
+# A .env beside the code only exists in a dev checkout and takes precedence; an
+# installed copy reads the one in the user's data directory. load_dotenv never
+# overwrites an already-set variable, so the first file found wins.
+load_dotenv(os.path.join(BACKEND_DIR, '.env'))
+load_dotenv(ENV_FILE)
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,9 +48,6 @@ app.add_middleware(
     allow_methods=['*'],
     allow_headers=['*'],
 )
-
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 _LOCAL_USER_ID = '__local__'

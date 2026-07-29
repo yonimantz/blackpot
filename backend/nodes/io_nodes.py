@@ -3,10 +3,7 @@ import io
 import os
 from PIL import Image
 
-EXPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'exports')
-os.makedirs(EXPORT_DIR, exist_ok=True)
-
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'uploads')
+from paths import EXPORT_DIR, UPLOAD_DIR
 
 
 def _load_asset_data_url(file_id: str) -> str | None:

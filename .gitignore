@@ -19,7 +19,8 @@ __pycache__/
 venv/
 ENV/
 
-# Backend runtime data (local SQLite, uploads, generated files)
+# Backend runtime data. Lives in %APPDATA%\SpotOn now; these are the older
+# in-repo locations, kept ignored so a stale checkout stays clean.
 backend/spoton.db
 backend/spoton.db-*
 backend/blackpot.db

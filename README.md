@@ -50,7 +50,17 @@ Set `CORS_ORIGINS` in `backend/.env` to a comma-separated list of allowed origin
 
 ## Local data
 
-The backend keeps everything in `backend/`: `spoton.db` (workflows, collection metadata, saved API keys), plus the `collection/`, `uploads/`, and `exports/` folders. All of it is gitignored.
+Everything the app writes lives in `%APPDATA%\SpotOn` (never inside the program folder, so an installed copy works from a read-only location):
+
+| Path | Contents |
+|------|----------|
+| `spoton.db` | Workflows, collection metadata, saved API keys |
+| `collection/` | Generated images |
+| `uploads/` | Imported source images |
+| `exports/` | Default destination for the Export node |
+| `.env` | Optional keys for an installed copy (a dev checkout uses `backend/.env` instead) |
+
+Set `SPOTON_DATA_DIR` to put that tree somewhere else — useful for a portable copy or for testing against throwaway data. `backend/paths.py` resolves all of it, and moves data from older layouts (`backend/spoton.db`, `blackpot.db`, `weavy.db`, and the sibling `collection/`, `uploads/`, `exports/` folders) on first run.
 
 ## Usage
 
