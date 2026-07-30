@@ -5,6 +5,7 @@ node_modules/
 frontend/dist/
 dist/
 packaging/build/
+packaging/SpotOn-Setup.exe
 packaging/SpotOn-icon-preview.png
 
 # Environment and secrets

@@ -7,6 +7,7 @@ import sys
 import threading
 import uuid
 import webbrowser
+from contextlib import asynccontextmanager
 from typing import Optional
 
 # Use the OS native trust store (Windows cert store, macOS Keychain, etc.) for
@@ -41,7 +42,19 @@ from nodes.tool_nodes import run_remove_bg_raw
 from persistence import get_persistence
 from request_context import RunContext, reset_run_context, set_run_context
 
-app = FastAPI(title="SpotOn API")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    db.init_db()
+    # Reclaim space from image blobs that the client migrates out of the graph.
+    try:
+        db.vacuum_if_bloated()
+    except Exception:
+        pass
+    yield
+
+
+app = FastAPI(title="SpotOn API", lifespan=lifespan)
 
 _cors = os.getenv('CORS_ORIGINS', '*').strip()
 _origins = [o.strip() for o in _cors.split(',') if o.strip()] if _cors != '*' else ['*']
@@ -56,16 +69,6 @@ app.add_middleware(
 
 _LOCAL_USER_ID = '__local__'
 _PERSISTENCE_OWNER = db.LEGACY_OWNER_SENTINEL
-
-
-@app.on_event('startup')
-def on_startup():
-    db.init_db()
-    # Reclaim space from image blobs that the client migrates out of the graph.
-    try:
-        db.vacuum_if_bloated()
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +653,19 @@ def main() -> None:
         threading.Thread(
             target=_open_browser_when_ready, args=(url, port), daemon=True
         ).start()
-        print(f'{APP_NAME} running at {url}')
+        # This window is the only way to stop the server, so say so plainly.
+        # Flush explicitly: stdout is block-buffered whenever it is not a
+        # terminal, which would hold the banner back until the process exits.
+        banner = (
+            '=' * 52,
+            f' {APP_NAME} is running at {url}',
+            ' Opening your browser...',
+            '',
+            ' Keep this window open while you work.',
+            ' Closing it shuts SpotOn down.',
+            '=' * 52,
+        )
+        print('\n'.join(banner), flush=True)
 
     uvicorn.run(
         app if desktop else 'main:app',

@@ -8,7 +8,8 @@ A node-based workflow editor for image generation and manipulation (React + Vite
 |------|---------|
 | `frontend/` | React app (Vite, XYFlow canvas) |
 | `backend/` | FastAPI API, workflow engine, local SQLite persistence |
-| `docs/` | [Gemini API keys](docs/GEMINI_API_KEYS.md) |
+| `docs/` | [Installing](docs/INSTALL.md), [Gemini API keys](docs/GEMINI_API_KEYS.md) |
+| `packaging/` | PyInstaller spec, Inno Setup script, icon, `build.bat` |
 | `run.bat` | Windows: starts backend and frontend, opens the browser |
 
 Branding assets live in `frontend/`: `src/assets/SpotOn-Icon.svg` is inlined into the workflow icons, and `public/SpotOn-Icon.svg` / `public/SpotOn-Logo.svg` are served as the favicon and the title-bar logo.
@@ -65,10 +66,17 @@ Set `CORS_ORIGINS` in `backend/.env` to a comma-separated list of allowed origin
 
 ```bat
 pip install -r packaging\requirements-build.txt
+winget install --id JRSoftware.InnoSetup
 packaging\build.bat
 ```
 
-That builds the frontend, then packages it with the backend into `packaging\dist\SpotOn\SpotOn.exe` (~320 MB, one folder). The console window it opens is the app's on/off switch — closing it stops the server.
+Three steps: build the frontend, package it with the backend into `packaging\dist\SpotOn\SpotOn.exe` (~320 MB, one folder), then wrap that folder into `packaging\SpotOn-Setup.exe` (~87 MB) — the single file you hand to someone else. If Inno Setup is missing, the build stops after the app folder and says so, which is enough for testing locally.
+
+The console window the app opens is its on/off switch — closing it stops the server.
+
+The installer is per-user: it needs no administrator rights, installs into `%LOCALAPPDATA%\Programs\SpotOn`, and an uninstall deliberately leaves `%APPDATA%\SpotOn` untouched so workflows and images survive it. Reinstalling over an existing copy upgrades it in place, which depends on `AppId` in `packaging\spoton.iss` never changing. Bump `MyAppVersion` there when handing out a new build. [docs/INSTALL.md](docs/INSTALL.md) is written for the recipient, so send it along.
+
+It is not code-signed, so Windows shows a SmartScreen "unknown publisher" warning that the recipient has to click through. Silencing that needs a paid certificate.
 
 The Remove Background model is not bundled. `rembg` downloads it (~168 MB) into `%USERPROFILE%\.u2net` the first time that node runs, which needs an internet connection but keeps the installer far smaller.
 
