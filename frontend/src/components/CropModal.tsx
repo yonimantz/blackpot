@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
 import { getConnectedImageDataUrl } from '../utils/upstreamImage';
+import { ANCHOR_LABELS, normalizeCropAnchor, readOffset } from '../utils/anchorPlacement';
+import { useCropAnchorSync } from '../utils/cropRect';
+import { AnchorOffsetControls } from './AnchorControls';
+import Icon from '../icons/Icon';
 
 const HANDLE_PX = 10;
 
@@ -252,19 +256,32 @@ export default function CropModal({
     return { dw: Math.round(iw * s), dh: Math.round(ih * s) };
   }, [iw, ih, maxPreviewWidth, maxPreviewHeight]);
 
-  const cx = Math.max(0, Math.floor(Number(data.x) || 0));
-  const cy = Math.max(0, Math.floor(Number(data.y) || 0));
-  const cw = Math.max(1, Math.floor(Number(data.width) || 1));
-  const ch = Math.max(1, Math.floor(Number(data.height) || 1));
+  const anchor = normalizeCropAnchor(data.anchor);
+  const anchored = anchor !== 'free';
+  const offset = readOffset(data);
+
+  // With a fixed anchor the rectangle position is derived, so the overlay and
+  // the number fields below show the same rect a run will produce.
+  const rect = useCropAnchorSync(nodeId, data, iw, ih);
+  const cx = rect.x;
+  const cy = rect.y;
+  const cw = rect.w;
+  const ch = rect.h;
+
+  useEffect(() => {
+    if (!open || iw <= 0 || ih <= 0) return;
+    if (Number(data._origWidth) === iw && Number(data._origHeight) === ih) return;
+    updateNodeData(nodeId, { _origWidth: iw, _origHeight: ih });
+  }, [open, iw, ih, data._origWidth, data._origHeight, nodeId, updateNodeData]);
 
   const persistCrop = useCallback(
-    (x: number, y: number, w: number, h: number) => {
+    (x: number, y: number, w: number, h: number, extra?: Record<string, any>) => {
       if (iw <= 0 || ih <= 0) {
-        updateNodeData(nodeId, { x, y, width: w, height: h });
+        updateNodeData(nodeId, { x, y, width: w, height: h, ...extra });
         return;
       }
       const c = clampCrop(x, y, w, h, iw, ih);
-      updateNodeData(nodeId, { x: c.x, y: c.y, width: c.w, height: c.h });
+      updateNodeData(nodeId, { x: c.x, y: c.y, width: c.w, height: c.h, ...extra });
     },
     [nodeId, updateNodeData, iw, ih],
   );
@@ -393,7 +410,9 @@ export default function CropModal({
         let ny = Math.round(d.startY + dyI);
         nx = Math.max(0, Math.min(nx, iw - d.startW));
         ny = Math.max(0, Math.min(ny, ih - d.startH));
-        persistCrop(nx, ny, d.startW, d.startH);
+        // Dragging the rectangle is an explicit free placement — an anchor
+        // would immediately pull it back, so release it and zero the offset.
+        persistCrop(nx, ny, d.startW, d.startH, { anchor: 'free', offsetX: 0, offsetY: 0 });
         return;
       }
 
@@ -450,17 +469,31 @@ export default function CropModal({
       <div className="compositor-modal" role="dialog" aria-labelledby="crop-modal-title">
         <div className="compositor-modal-header">
           <h2 id="crop-modal-title">Crop</h2>
-          <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close">
-            ×
+          <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close" title="Close">
+            <Icon name="close-line" size={18} />
           </button>
         </div>
         <div className="compositor-modal-body">
           <aside className="compositor-modal-sidebar">
             <p className="compositor-modal-hint">
-              Drag inside the crop to move. Drag edges or corners to resize. Hold Shift while resizing to keep aspect
-              ratio. You can also type exact pixel values below.
+              Pick an anchor to align the crop, then nudge it with the offset. Drag edges or corners to
+              resize (hold Shift to keep the aspect ratio); dragging inside the crop moves it freely and
+              releases the anchor.
             </p>
-            <label className="inspector-label">Crop (px)</label>
+            <label className="inspector-label">Anchor &amp; Offset</label>
+            <AnchorOffsetControls
+              anchor={anchor}
+              offsetX={offset.x}
+              offsetY={offset.y}
+              onAnchorChange={(next) => updateNodeData(nodeId, { anchor: next })}
+              onOffsetChange={({ x, y }) => updateNodeData(nodeId, { offsetX: x, offsetY: y })}
+              disabled={isRunning}
+              onFreeSelect={() => updateNodeData(nodeId, { anchor: 'free' })}
+              note={anchored ? ANCHOR_LABELS[anchor] : 'Dragged position'}
+            />
+            <label className="inspector-label" style={{ marginTop: 12 }}>
+              Crop (px)
+            </label>
             <div className="editor-field-row" style={{ marginBottom: 8 }}>
               <label style={{ minWidth: 14 }}>X</label>
               <input
@@ -468,7 +501,8 @@ export default function CropModal({
                 type="number"
                 min={0}
                 value={cx}
-                disabled={isRunning}
+                disabled={isRunning || anchored}
+                title={anchored ? 'Derived from the anchor and offset' : undefined}
                 onChange={(e) => updateField('x', parseInt(e.target.value, 10) || 0)}
               />
               <label style={{ minWidth: 14 }}>Y</label>
@@ -477,7 +511,8 @@ export default function CropModal({
                 type="number"
                 min={0}
                 value={cy}
-                disabled={isRunning}
+                disabled={isRunning || anchored}
+                title={anchored ? 'Derived from the anchor and offset' : undefined}
                 onChange={(e) => updateField('y', parseInt(e.target.value, 10) || 0)}
               />
             </div>

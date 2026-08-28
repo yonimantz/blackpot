@@ -5,6 +5,8 @@ import os
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 import numpy as np
 
+from . import fal_common
+
 # Keep in sync with frontend `MAX_COMPOSITOR_LAYERS` in nodeTypes.ts
 MAX_COMPOSITOR_LAYERS = 24
 
@@ -17,7 +19,82 @@ MAX_STACK_IMAGES = 12
 # Keep in sync with frontend `MAX_DIVIDER_OUTPUTS` in nodeTypes.ts
 MAX_DIVIDER_OUTPUTS = 16
 
+# Background removal. Keep in sync with `MODELS` in RemoveBgModal.tsx.
+REMOVE_BG_ENDPOINT = 'fal-ai/birefnet/v2'
+REMOVE_BG_MODELS = (
+    'General Use (Light)',
+    'General Use (Light 2K)',
+    'General Use (Heavy)',
+    'Matting',
+    'Portrait',
+)
+DEFAULT_REMOVE_BG_MODEL = 'General Use (Heavy)'
+REMOVE_BG_RESOLUTIONS = ('1024x1024', '2048x2048')
+
+# Model ids from the local rembg era, mapped to their closest birefnet variant so
+# a workflow saved before the fal migration keeps working.
+_LEGACY_REMBG_MODELS = {
+    'u2net': 'General Use (Light)',
+    'u2netp': 'General Use (Light)',
+    'u2net_human_seg': 'Portrait',
+    'isnet-general-use': 'General Use (Light)',
+    'birefnet-general': 'General Use (Heavy)',
+    'birefnet-portrait': 'Portrait',
+}
+
 _GREY_BG = (154, 154, 160, 255)
+
+# Fraction of the free space that sits before the anchored box, per axis.
+# Keep in sync with frontend `utils/anchorPlacement.ts`.
+_ANCHOR_FRACTIONS = {
+    'topLeft': (0.0, 0.0),
+    'top': (0.5, 0.0),
+    'topRight': (1.0, 0.0),
+    'left': (0.0, 0.5),
+    'center': (0.5, 0.5),
+    'right': (1.0, 0.5),
+    'bottomLeft': (0.0, 1.0),
+    'bottom': (0.5, 1.0),
+    'bottomRight': (1.0, 1.0),
+}
+
+
+def _js_round(value: float) -> int:
+    """Round halves up, the way JS `Math.round` does, so the live previews in
+    the frontend land on exactly the same pixel as a run."""
+    return math.floor(value + 0.5)
+
+
+def _anchor_origin(anchor: str, outer_w: int, outer_h: int, inner_w: int, inner_h: int):
+    """Top-left corner of an `inner` box anchored inside an `outer` box."""
+    fx, fy = _ANCHOR_FRACTIONS.get(anchor, _ANCHOR_FRACTIONS['center'])
+    return _js_round((outer_w - inner_w) * fx), _js_round((outer_h - inner_h) * fy)
+
+
+def _read_offset(data: dict):
+    try:
+        ox = int(data.get('offsetX', 0) or 0)
+    except (TypeError, ValueError):
+        ox = 0
+    try:
+        oy = int(data.get('offsetY', 0) or 0)
+    except (TypeError, ValueError):
+        oy = 0
+    return ox, oy
+
+
+def _place_on_transparent_canvas(src: Image.Image, w: int, h: int, x: int, y: int) -> Image.Image:
+    """Paste `src` at (x, y) on a transparent w×h canvas, clipping overflow."""
+    canvas = Image.new('RGBA', (max(1, w), max(1, h)), (0, 0, 0, 0))
+    src = src.convert('RGBA')
+    sx0 = max(0, -x)
+    sy0 = max(0, -y)
+    sx1 = min(src.width, canvas.width - x)
+    sy1 = min(src.height, canvas.height - y)
+    if sx1 > sx0 and sy1 > sy0:
+        region = src.crop((sx0, sy0, sx1, sy1))
+        canvas.paste(region, (x + sx0, y + sy0))
+    return canvas
 
 def _decode_image(data: str) -> Image.Image:
     """Decode a base64 data URL or raw base64 string into a PIL Image."""
@@ -41,20 +118,25 @@ def _encode_image(img: Image.Image, fmt: str = 'PNG') -> str:
 
 
 def execute_tool_node(node_type: str, data: dict, inputs: dict) -> dict:
+    """Synchronous, local-only tool nodes.
+
+    `removeBg` is dispatched separately by the engine because it now calls fal
+    and has to be awaited.
+    """
     if node_type == 'editor':
         return _execute_editor(data, inputs)
     if node_type == 'compositor':
         return _execute_compositor(data, inputs)
     if node_type == 'vignette':
         return _execute_vignette(data, inputs)
+    if node_type == 'adjustments':
+        return _execute_adjustments(data, inputs)
     if node_type == 'getChannel':
         return _execute_get_channel(inputs)
     if node_type == 'setMask':
         return _execute_set_mask(data, inputs)
     if node_type == 'simpleCombine':
         return _execute_simple_combine(data, inputs)
-    if node_type == 'removeBg':
-        return _execute_remove_bg(data, inputs)
     if node_type == 'keyColor':
         return _execute_key_color(data, inputs)
     if node_type == 'stackImages':
@@ -69,18 +151,10 @@ def execute_tool_node(node_type: str, data: dict, inputs: dict) -> dict:
     img = _decode_image(img_data)
 
     if node_type == 'resize':
-        # The frontend keeps width/height in proportion when the user toggles
-        # the aspect-lock button, so we always apply a literal resize here.
-        w = max(1, int(inputs.get('width', data.get('width', 512))))
-        h = max(1, int(inputs.get('height', data.get('height', 512))))
-        img = img.resize((w, h), Image.LANCZOS)
+        img = _apply_resize(data, inputs, img)
 
     elif node_type == 'crop':
-        x = int(inputs.get('x', data.get('x', 0)))
-        y = int(inputs.get('y', data.get('y', 0)))
-        w = int(inputs.get('width', data.get('width', 256)))
-        h = int(inputs.get('height', data.get('height', 256)))
-        img = img.crop((x, y, x + w, y + h))
+        img = _apply_crop(data, inputs, img)
 
     elif node_type == 'blur':
         radius = float(inputs.get('radius', data.get('radius', 2)))
@@ -98,6 +172,74 @@ def execute_tool_node(node_type: str, data: dict, inputs: dict) -> dict:
             img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
     return {'image': _encode_image(img)}
+
+
+def _apply_resize(data: dict, inputs: dict, img: Image.Image) -> Image.Image:
+    """Resize to W×H in one of three modes (see frontend `ResizeMode`):
+
+    - ``stretch``: scale straight to W×H, distorting if the ratio differs.
+    - ``fit``: scale proportionally to fit inside W×H, then anchor it in the
+      frame; the uncovered area stays transparent.
+    - ``canvas``: keep the pixels at their original size and change the frame
+      to W×H, cropping when smaller and padding transparently when larger.
+
+    In ``fit`` / ``canvas`` the anchor picks the corner, edge or center the
+    image is aligned to, and offsetX/offsetY nudge it from there.
+    """
+    w = max(1, int(inputs.get('width', data.get('width', 512))))
+    h = max(1, int(inputs.get('height', data.get('height', 512))))
+    mode = data.get('resizeMode', 'stretch')
+    if mode not in ('fit', 'canvas'):
+        return img.resize((w, h), Image.LANCZOS)
+
+    anchor = data.get('anchor', 'center')
+    off_x, off_y = _read_offset(data)
+
+    placed = img
+    if mode == 'fit':
+        scale = min(w / img.width, h / img.height)
+        placed = img.resize(
+            (max(1, _js_round(img.width * scale)), max(1, _js_round(img.height * scale))),
+            Image.LANCZOS,
+        )
+
+    x, y = _anchor_origin(anchor, w, h, placed.width, placed.height)
+    return _place_on_transparent_canvas(placed, w, h, x + off_x, y + off_y)
+
+
+def _apply_crop(data: dict, inputs: dict, img: Image.Image) -> Image.Image:
+    """Cut a W×H rectangle out of the image.
+
+    With an anchor the rectangle is positioned automatically (corner, middle
+    edge or center) and offsetX/offsetY nudge it; ``free`` — also the default
+    for workflows saved before anchors existed — uses the stored x/y instead.
+    A rectangle larger than the source pads transparently.
+    """
+    w = max(1, int(inputs.get('width', data.get('width', 256))))
+    h = max(1, int(inputs.get('height', data.get('height', 256))))
+    anchor = data.get('anchor', 'free')
+    off_x, off_y = _read_offset(data)
+
+    if anchor in _ANCHOR_FRACTIONS:
+        x, y = _anchor_origin(anchor, img.width, img.height, w, h)
+    else:
+        x = int(inputs.get('x', data.get('x', 0)))
+        y = int(inputs.get('y', data.get('y', 0)))
+
+    x += off_x
+    y += off_y
+
+    # Keep the rectangle inside the source whenever it fits; when it is bigger
+    # it stays where the anchor put it and the overflow is padded.
+    if w <= img.width:
+        x = max(0, min(x, img.width - w))
+    if h <= img.height:
+        y = max(0, min(y, img.height - h))
+
+    if x < 0 or y < 0 or x + w > img.width or y + h > img.height:
+        return _place_on_transparent_canvas(img, w, h, -x, -y)
+
+    return img.crop((x, y, x + w, y + h))
 
 
 def _execute_editor(data: dict, inputs: dict) -> dict:
@@ -143,6 +285,12 @@ def _execute_editor(data: dict, inputs: dict) -> dict:
         rotation = float(cfg.get('rotation', 0))
         if rotation != 0:
             layer_img = layer_img.rotate(-rotation, expand=True, resample=Image.BICUBIC)
+
+        opacity = max(0.0, min(1.0, float(cfg.get('opacity', 1.0))))
+        if opacity < 1.0:
+            r, g, b, a = layer_img.split()
+            a = a.point(lambda v: int(v * opacity))
+            layer_img = Image.merge('RGBA', (r, g, b, a))
 
         cx = int(cfg.get('x', 0))
         cy = int(cfg.get('y', 0))
@@ -243,6 +391,176 @@ def _execute_vignette(data: dict, inputs: dict) -> dict:
             arr[:, :, 2] = bb * (1.0 - am) + cb * am
 
     out = np.clip(arr, 0.0, 255.0).astype(np.uint8)
+    return {'image': _encode_image(Image.fromarray(out, 'RGBA'))}
+
+
+# Keep in sync with frontend `adjustmentsMath.ts` GAMMA_MIN / GAMMA_MAX.
+_ADJUSTMENTS_GAMMA_MIN = 0.1
+_ADJUSTMENTS_GAMMA_MAX = 10.0
+
+
+def _num(v, default: float) -> float:
+    """Coerce to a finite float, matching the frontend's `Number.isFinite` guard."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(f):
+        return default
+    return f
+
+
+def _clamp_num(n: float, lo: float, hi: float) -> float:
+    return lo if n < lo else hi if n > hi else n
+
+
+def _normalize_adjustments(data: dict) -> dict:
+    """Mirrors frontend `normalizeAdjustments`: clamps and fills gaps from a
+    saved graph. Hue is clamped, not wrapped — only the per-pixel shift wraps.
+    """
+    lv = data.get('levels')
+    if not isinstance(lv, dict):
+        lv = {}
+    return {
+        'hue': _clamp_num(_num(data.get('hue'), 0.0), -180.0, 180.0),
+        'saturation': _clamp_num(_num(data.get('saturation'), 0.0), -100.0, 100.0),
+        'value': _clamp_num(_num(data.get('value'), 0.0), -100.0, 100.0),
+        'levels': {
+            'inBlack': _clamp_num(_num(lv.get('inBlack'), 0.0), 0.0, 255.0),
+            'inWhite': _clamp_num(_num(lv.get('inWhite'), 255.0), 0.0, 255.0),
+            'gamma': _clamp_num(_num(lv.get('gamma'), 1.0), _ADJUSTMENTS_GAMMA_MIN, _ADJUSTMENTS_GAMMA_MAX),
+            'outBlack': _clamp_num(_num(lv.get('outBlack'), 0.0), 0.0, 255.0),
+            'outWhite': _clamp_num(_num(lv.get('outWhite'), 255.0), 0.0, 255.0),
+        },
+    }
+
+
+def _adjustments_levels_is_identity(l: dict) -> bool:
+    return (
+        l['inBlack'] == 0 and l['inWhite'] == 255 and l['gamma'] == 1
+        and l['outBlack'] == 0 and l['outWhite'] == 255
+    )
+
+
+def _adjustments_is_identity(params: dict) -> bool:
+    return (
+        params['hue'] == 0 and params['saturation'] == 0 and params['value'] == 0
+        and _adjustments_levels_is_identity(params['levels'])
+    )
+
+
+def _build_adjustments_levels_lut(l: dict):
+    """256-entry input byte -> output byte map. Returns None when a no-op,
+    mirroring frontend `buildLevelsLut`."""
+    if _adjustments_levels_is_identity(l):
+        return None
+
+    in_black = l['inBlack']
+    in_white = l['inWhite']
+    out_black = l['outBlack']
+    out_white = l['outWhite']
+    gamma = l['gamma']
+    span = in_white - in_black
+
+    c = np.arange(256, dtype=np.float64)
+    if span > 0:
+        t = np.clip((c - in_black) / span, 0.0, 1.0)
+    else:
+        # Degenerate input range collapses to a hard threshold at inBlack.
+        t = np.where(c <= in_black, 0.0, 1.0)
+    if gamma != 1:
+        t = np.power(t, 1.0 / gamma)
+
+    out = np.clip(np.floor(out_black + t * (out_white - out_black) + 0.5), 0.0, 255.0)
+    return out.astype(np.uint8)
+
+
+def _adjustments_apply_hsv(rgb: np.ndarray, hue: float, saturation: float, value: float) -> np.ndarray:
+    """Vectorized HSV shift over an (H, W, 3) float64 array in 0..255.
+
+    Mirrors `colorsys.rgb_to_hsv` / `colorsys.hsv_to_rgb`, and the frontend's
+    per-pixel loop in `applyAdjustmentsToRgba`. Returns float64 values already
+    rounded (round-half-up) and clamped to 0..255 — the caller must byte-cast
+    before the Levels stage, per the hard HSV-then-Levels contract.
+    """
+    r = rgb[:, :, 0] / 255.0
+    g = rgb[:, :, 1] / 255.0
+    b = rgb[:, :, 2] / 255.0
+
+    maxc = np.maximum(np.maximum(r, g), b)
+    minc = np.minimum(np.minimum(r, g), b)
+    rng = maxc - minc
+    range_eq_zero = rng == 0
+
+    v = maxc
+    safe_rng = np.where(range_eq_zero, 1.0, rng)
+    safe_maxc = np.where(range_eq_zero, 1.0, maxc)
+    s = np.where(range_eq_zero, 0.0, rng / safe_maxc)
+
+    rc = (maxc - r) / safe_rng
+    gc = (maxc - g) / safe_rng
+    bc = (maxc - b) / safe_rng
+
+    is_r_max = r == maxc
+    is_g_max = (~is_r_max) & (g == maxc)
+    h_raw = np.where(is_r_max, bc - gc, np.where(is_g_max, 2.0 + rc - bc, 4.0 + gc - rc))
+    h = np.where(range_eq_zero, 0.0, np.mod(h_raw / 6.0, 1.0))
+
+    h = np.mod(h + hue / 360.0, 1.0)
+    s = np.clip(s * (1.0 + saturation / 100.0), 0.0, 1.0)
+    v = np.clip(v * (1.0 + value / 100.0), 0.0, 1.0)
+
+    h6 = h * 6.0
+    i = np.floor(h6).astype(np.int64) % 6
+    f = h6 - np.floor(h6)
+    p = v * (1.0 - s)
+    q = v * (1.0 - s * f)
+    t = v * (1.0 - s * (1.0 - f))
+
+    conds = [i == 0, i == 1, i == 2, i == 3, i == 4]
+    nr = np.select(conds, [v, q, p, p, t], default=v)
+    ng = np.select(conds, [t, v, v, q, p], default=p)
+    nb = np.select(conds, [p, p, t, v, v], default=q)
+
+    out = np.empty_like(rgb)
+    out[:, :, 0] = np.clip(np.floor(nr * 255.0 + 0.5), 0.0, 255.0)
+    out[:, :, 1] = np.clip(np.floor(ng * 255.0 + 0.5), 0.0, 255.0)
+    out[:, :, 2] = np.clip(np.floor(nb * 255.0 + 0.5), 0.0, 255.0)
+    return out
+
+
+def _execute_adjustments(data: dict, inputs: dict) -> dict:
+    """Numpy twin of frontend `applyAdjustmentsToRgba` (adjustmentsMath.ts).
+
+    HARD CONTRACT with the frontend: HSV first, then Levels, and the HSV
+    result is rounded to 8 bits before the Levels LUT indexes it.
+    """
+    img_data = inputs.get('image') or data.get('image')
+    if not img_data:
+        raise ValueError('adjustments: no image input')
+
+    img = _decode_image(img_data).convert('RGBA')
+    params = _normalize_adjustments(data)
+    if _adjustments_is_identity(params):
+        return {'image': _encode_image(img)}
+
+    do_hsv = params['hue'] != 0 or params['saturation'] != 0 or params['value'] != 0
+    lut = _build_adjustments_levels_lut(params['levels'])
+    if not do_hsv and lut is None:
+        return {'image': _encode_image(img)}
+
+    arr = np.asarray(img, dtype=np.float64)
+    rgb = arr[:, :, :3]
+    if do_hsv:
+        rgb = _adjustments_apply_hsv(rgb, params['hue'], params['saturation'], params['value'])
+
+    rgb_bytes = np.clip(rgb, 0.0, 255.0).astype(np.uint8)
+    if lut is not None:
+        rgb_bytes = lut[rgb_bytes]
+
+    out = np.empty(arr.shape, dtype=np.uint8)
+    out[:, :, :3] = rgb_bytes
+    out[:, :, 3] = np.clip(arr[:, :, 3], 0.0, 255.0).astype(np.uint8)
     return {'image': _encode_image(Image.fromarray(out, 'RGBA'))}
 
 
@@ -496,9 +814,6 @@ def _hex_to_rgb(hex_str: str) -> tuple[float, float, float]:
         return (0.0, 255.0, 0.0)
 
 
-_REMBG_SESSION_CACHE: dict[str, object] = {}
-
-
 def _safe_int(v, default: int = 0) -> int:
     try:
         return int(v)
@@ -586,58 +901,86 @@ def _apply_mask_to_rgba(src_rgba: Image.Image, mask: Image.Image) -> Image.Image
     return Image.fromarray(out_arr, mode='RGBA')
 
 
-def _get_rembg_session(model_name: str):
-    model = model_name.strip() or 'isnet-general-use'
-    cached = _REMBG_SESSION_CACHE.get(model)
-    if cached is not None:
-        return cached
+def _resolve_remove_bg_model(raw) -> str:
+    name = str(raw or '').strip()
+    if name in REMOVE_BG_MODELS:
+        return name
+    return _LEGACY_REMBG_MODELS.get(name, DEFAULT_REMOVE_BG_MODEL)
+
+
+async def _fetch_remove_bg_output(result: dict, key: str) -> Image.Image | None:
+    node = (result or {}).get(key)
+    url = node.get('url') if isinstance(node, dict) else None
+    if not url:
+        return None
+    img_bytes, _mime, err = await fal_common.download_image(url, 'removeBg')
+    if err:
+        raise ValueError(err)
+    return Image.open(io.BytesIO(img_bytes))
+
+
+async def run_remove_bg_raw(image_data: str, data: dict) -> dict[str, str]:
+    """Cut out the background and return both the cutout and its raw mask.
+
+    The mask is what the node's threshold/feather/erode/dilate controls and the
+    preview modal operate on, so it stays part of the contract even though fal
+    hands us a finished cutout.
+    """
+    if not fal_common.HAS_FAL:
+        raise ValueError(f'removeBg: {fal_common.MISSING_CLIENT_ERROR}')
+
+    api_key = fal_common.resolve_api_key(data)
+    if not api_key:
+        raise ValueError(f'removeBg: {fal_common.NO_KEY_ERROR}')
+
+    client = fal_common.make_client(api_key)
     try:
-        from rembg import new_session
-    except ImportError as e:
+        image_url = await fal_common.upload_image(client, image_data)
+    except Exception as e:
         raise ValueError(
-            'removeBg: rembg is not installed. Run: pip install -U rembg[cpu]'
+            fal_common.describe_error('removeBg', REMOVE_BG_ENDPOINT, str(e))
         ) from e
-    session = new_session(model)
-    _REMBG_SESSION_CACHE[model] = session
-    return session
 
-
-def run_remove_bg_raw(image_data: str, data: dict) -> dict[str, str]:
-    src = _decode_image(image_data).convert('RGBA')
-    session = _get_rembg_session(str(data.get('model', 'isnet-general-use')))
-
-    alpha_matting = bool(data.get('alphaMatting', False))
-    fg = max(0, min(255, _safe_int(data.get('fgThreshold'), 240)))
-    bg = max(0, min(255, _safe_int(data.get('bgThreshold'), 10)))
-    erode_size = max(0, min(50, _safe_int(data.get('erodeSize'), 10)))
+    resolution = str(data.get('operatingResolution') or '1024x1024').strip()
+    if resolution not in REMOVE_BG_RESOLUTIONS:
+        resolution = '1024x1024'
 
     try:
-        from rembg import remove
-    except ImportError as e:
+        result = await client.subscribe(
+            REMOVE_BG_ENDPOINT,
+            arguments={
+                'image_url': image_url,
+                'model': _resolve_remove_bg_model(data.get('model')),
+                'operating_resolution': resolution,
+                'output_format': 'png',
+                'refine_foreground': bool(data.get('refineForeground', True)),
+                'output_mask': True,
+            },
+            with_logs=False,
+        )
+    except Exception as e:
         raise ValueError(
-            'removeBg: rembg is not installed. Run: pip install -U rembg[cpu]'
+            fal_common.describe_error('removeBg', REMOVE_BG_ENDPOINT, str(e))
         ) from e
 
-    cutout = remove(
-        src,
-        session=session,
-        alpha_matting=alpha_matting,
-        alpha_matting_foreground_threshold=fg,
-        alpha_matting_background_threshold=bg,
-        alpha_matting_erode_size=erode_size,
-    )
-    if not isinstance(cutout, Image.Image):
-        cutout = src.copy()
+    cutout = await _fetch_remove_bg_output(result, 'image')
+    if cutout is None:
+        raise ValueError('removeBg: fal returned no image.')
     cutout = cutout.convert('RGBA')
-    raw_mask = cutout.getchannel('A').convert('L')
 
+    mask = await _fetch_remove_bg_output(result, 'mask_image')
+    raw_mask = mask.convert('L') if mask is not None else cutout.getchannel('A').convert('L')
+
+    # fal runs at its operating resolution, so the cutout can come back a
+    # different size than the source; everything downstream composites the mask
+    # against the original pixels.
     return {
         'rawImage': _encode_image(cutout),
         'rawMask': _encode_image(raw_mask.convert('RGB')),
     }
 
 
-def _execute_remove_bg(data: dict, inputs: dict) -> dict:
+async def execute_remove_bg_node(data: dict, inputs: dict) -> dict:
     baked = data.get('_removeBgBaked')
     if isinstance(baked, str) and baked.startswith('data:'):
         return {'image': baked}
@@ -647,8 +990,10 @@ def _execute_remove_bg(data: dict, inputs: dict) -> dict:
         raise ValueError('removeBg: no image input')
 
     src = _decode_image(img_data).convert('RGBA')
-    raw = run_remove_bg_raw(img_data, data)
+    raw = await run_remove_bg_raw(img_data, data)
     raw_mask = _decode_image(raw['rawMask']).convert('L')
+    if raw_mask.size != src.size:
+        raw_mask = raw_mask.resize(src.size, Image.LANCZOS)
     mask = _postprocess_remove_bg_mask(raw_mask, data)
     out = _apply_mask_to_rgba(src, mask)
 

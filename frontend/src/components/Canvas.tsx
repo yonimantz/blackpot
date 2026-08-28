@@ -6,21 +6,38 @@ import {
   MiniMap,
   SelectionMode,
 } from '@xyflow/react';
-import type { ReactFlowInstance, Edge, Connection, FinalConnectionState, NodeChange } from '@xyflow/react';
+import type {
+  ReactFlowInstance,
+  Edge,
+  Connection,
+  FinalConnectionState,
+  NodeChange,
+  OnNodeDrag,
+  OnMoveStart,
+  OnMoveEnd,
+  SelectionDragHandler,
+  NodeMouseHandler,
+} from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useWorkflowStore, findGroupIdForNode } from '../store/workflowStore';
+import { useWorkflowStore } from '../store/workflowStore';
 import { buildImportImageData } from '../utils/importImageData';
 import { nodeTypes } from '../nodes/nodeRegistry';
 import {
   NODE_TYPE_DEFINITIONS,
   NODE_CATEGORIES,
+  PLACEABLE_NODE_DEFINITIONS,
   getNodeInputs,
   getNodeOutputs,
   getNodeTypesConnectableFromWireOrigin,
+  pickRandomValueTypeForPort,
+  booleanValueTypeForPort,
+  isPlaceableNodeType,
   isNodeTypePinnable,
   type PortType,
 } from '../types/nodeTypes';
 import NodeGroups from './NodeGroups';
+import Icon from '../icons/Icon';
+import { iconForNodeType } from '../constants/nodeIcons';
 
 interface WireDropContext {
   originNodeId: string;
@@ -54,36 +71,6 @@ function isRasterImageFile(file: File): boolean {
   return /\.(png|jpe?g)$/i.test(file.name);
 }
 
-function FocusModeCanvasChip() {
-  const focusedGroupId = useWorkflowStore((s) => s.focusedGroupId);
-  const groups = useWorkflowStore((s) => s.groups);
-  const clearGroupFocus = useWorkflowStore((s) => s.clearGroupFocus);
-  const focusedGroup =
-    focusedGroupId != null ? groups.find((g) => g.id === focusedGroupId) : undefined;
-
-  if (!focusedGroup) return null;
-
-  const title = `${focusedGroup.name} — run uses only this group. Press F or click to exit.`;
-
-  return (
-    <button
-      type="button"
-      className="focus-mode-canvas-chip"
-      onClick={clearGroupFocus}
-      title={title}
-      aria-label={title}
-    >
-      <span className="focus-mode-canvas-chip-icon" aria-hidden>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-        </svg>
-      </span>
-      <span className="focus-mode-canvas-chip-text">Focus mode</span>
-    </button>
-  );
-}
-
 export default function Canvas() {
   // Granular selectors so the canvas only re-renders when the data it actually
   // passes to ReactFlow changes (nodes / edges / isRunning), not on every store
@@ -96,6 +83,8 @@ export default function Canvas() {
   const onEdgesChange = useWorkflowStore((s) => s.onEdgesChange);
   const onConnect = useWorkflowStore((s) => s.onConnect);
   const setSelectedNodeId = useWorkflowStore((s) => s.setSelectedNodeId);
+  const clearCanvasSelection = useWorkflowStore((s) => s.clearCanvasSelection);
+  const selectOnlyNode = useWorkflowStore((s) => s.selectOnlyNode);
   const addNode = useWorkflowStore((s) => s.addNode);
   const addNodeAndConnectFromHandle = useWorkflowStore((s) => s.addNodeAndConnectFromHandle);
   const setBypassForNodeIds = useWorkflowStore((s) => s.setBypassForNodeIds);
@@ -106,8 +95,24 @@ export default function Canvas() {
   const reactFlowInstance = useRef<ReactFlowInstance | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const ignoreNextPaneClickRef = useRef(false);
+  const pointerDraggedRef = useRef(false);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [menuFilter, setMenuFilter] = useState('');
+
+  // Any press outside the menu dismisses it, including the press that starts a
+  // pan or box-selection. Registered only while the menu is open, so the
+  // pointer-up that opened it (wire drop / right click) cannot close it.
+  useEffect(() => {
+    if (!contextMenu) return;
+    const dismiss = (event: PointerEvent) => {
+      if (contextMenuRef.current?.contains(event.target as Node)) return;
+      ignoreNextPaneClickRef.current = false;
+      setContextMenu(null);
+    };
+    window.addEventListener('pointerdown', dismiss, true);
+    return () => window.removeEventListener('pointerdown', dismiss, true);
+  }, [contextMenu]);
 
   // --- Reconnect (Disconnect + Pull) ---
   const edgeReconnectSuccessful = useRef(true);
@@ -141,17 +146,82 @@ export default function Canvas() {
   const lastCutPos = useRef<{ x: number; y: number } | null>(null);
   const [ctrlHeld, setCtrlHeld] = useState(false);
 
-  const onNodeDragStart = useCallback(() => {
-    useWorkflowStore.getState().beginMoveUndoSession();
+  // Alt+drag duplicate: on drag start, leave a stationary copy of the dragged node(s) behind
+  // and let the drag continue moving the originals as usual.
+  const onNodeDragStart = useCallback<OnNodeDrag>((event, _node, nodes) => {
+    pointerDraggedRef.current = true;
+    document.body.classList.add('is-dragging-node');
+    const store = useWorkflowStore.getState();
+    store.beginMoveUndoSession();
+    if (event.altKey) {
+      store.duplicateNodesInPlace(nodes.map((n) => n.id));
+    }
   }, []);
   const onNodeDragStop = useCallback(() => {
+    document.body.classList.remove('is-dragging-node');
     useWorkflowStore.getState().endMoveUndoSession();
   }, []);
-  const onSelectionDragStart = useCallback(() => {
-    useWorkflowStore.getState().beginMoveUndoSession();
+  const onSelectionDragStart = useCallback<SelectionDragHandler>((event, nodes) => {
+    pointerDraggedRef.current = true;
+    document.body.classList.add('is-dragging-node');
+    const store = useWorkflowStore.getState();
+    store.beginMoveUndoSession();
+    if (event.altKey) {
+      store.duplicateNodesInPlace(nodes.map((n) => n.id));
+    }
   }, []);
   const onSelectionDragStop = useCallback(() => {
+    document.body.classList.remove('is-dragging-node');
     useWorkflowStore.getState().endMoveUndoSession();
+  }, []);
+
+  const onMoveStart = useCallback<OnMoveStart>((event) => {
+    if (event == null) return;
+    if (event instanceof MouseEvent || event instanceof TouchEvent) {
+      document.body.classList.add('is-panning');
+    }
+  }, []);
+  const onMoveEnd = useCallback<OnMoveEnd>(() => {
+    document.body.classList.remove('is-panning');
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      document.body.classList.remove('is-connecting');
+      document.body.classList.remove('is-dragging-node');
+      document.body.classList.remove('is-panning');
+      document.body.classList.remove('is-space-pan');
+    };
+  }, []);
+
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable;
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' && e.key !== ' ') return;
+      if (isEditableTarget(e.target)) return;
+      if (useWorkflowStore.getState().isRunning) return;
+      document.body.classList.add('is-space-pan');
+    };
+    const clearSpacePan = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' && e.key !== ' ') return;
+      document.body.classList.remove('is-space-pan');
+    };
+    const onWindowBlur = () => document.body.classList.remove('is-space-pan');
+
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', clearSpacePan, true);
+    window.addEventListener('blur', onWindowBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('keyup', clearSpacePan, true);
+      window.removeEventListener('blur', onWindowBlur);
+      document.body.classList.remove('is-space-pan');
+    };
   }, []);
 
   useEffect(() => {
@@ -364,6 +434,7 @@ export default function Canvas() {
   }, [isCutting, removeEdgesByIds, checkEdgesUnderPoint]);
 
   const handlePointerDownCapture = useCallback((e: React.PointerEvent) => {
+    pointerDraggedRef.current = false;
     // Clear any leftover browser text selection when starting an interaction on
     // the canvas (but keep it if the user is clicking into an editing field).
     if (e.button === 0) {
@@ -400,6 +471,14 @@ export default function Canvas() {
     [setSelectedNodeId]
   );
 
+  const onNodeClick = useCallback<NodeMouseHandler>(
+    (event, node) => {
+      if (event.shiftKey || pointerDraggedRef.current) return;
+      selectOnlyNode(node.id);
+    },
+    [selectOnlyNode]
+  );
+
   // --- Standard ReactFlow callbacks ---
   const onInit = useCallback((instance: ReactFlowInstance) => {
     reactFlowInstance.current = instance;
@@ -410,9 +489,9 @@ export default function Canvas() {
       ignoreNextPaneClickRef.current = false;
       return;
     }
-    setSelectedNodeId(null);
+    clearCanvasSelection();
     setContextMenu(null);
-  }, [setSelectedNodeId]);
+  }, [clearCanvasSelection]);
 
   const onPaneContextMenu = useCallback(
     (event: React.MouseEvent | MouseEvent) => {
@@ -434,8 +513,13 @@ export default function Canvas() {
     []
   );
 
+  const onConnectStart = useCallback(() => {
+    document.body.classList.add('is-connecting');
+  }, []);
+
   const onConnectEnd = useCallback(
     (event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
+      document.body.classList.remove('is-connecting');
       if (useWorkflowStore.getState().isRunning) return;
       if (state.toHandle != null) return;
       const fromNode = state.fromNode;
@@ -500,7 +584,7 @@ export default function Canvas() {
       if (!rf) return;
 
       const nodeType = event.dataTransfer.getData('application/reactflow-type');
-      if (nodeType && NODE_TYPE_DEFINITIONS[nodeType]) {
+      if (isPlaceableNodeType(nodeType)) {
         const position = rf.screenToFlowPosition({
           x: event.clientX,
           y: event.clientY,
@@ -564,29 +648,10 @@ export default function Canvas() {
       }
 
       const store = useWorkflowStore.getState();
-      const { nodes, selectedNodeId, focusedGroupId, groups, clearGroupFocus, toggleGroupFocus } =
-        store;
-
-      if (event.key === 'f' || event.key === 'F') {
-        if (event.ctrlKey || event.metaKey || event.altKey) return;
-        if (focusedGroupId) {
-          clearGroupFocus();
-          event.preventDefault();
-          return;
-        }
-        if (selectedNodeId) {
-          const gid = findGroupIdForNode(groups, selectedNodeId);
-          if (gid) {
-            toggleGroupFocus(gid);
-            event.preventDefault();
-          }
-        }
-        return;
-      }
+      const { nodes, selectedNodeId } = store;
 
       if (event.key === 'm' || event.key === 'M') {
         if (event.ctrlKey || event.metaKey) return;
-        if (focusedGroupId) return;
         let targetIds = nodes.filter((n) => n.selected).map((n) => n.id);
         if (targetIds.length === 0 && selectedNodeId) targetIds = [selectedNodeId];
         if (targetIds.length === 0) return;
@@ -625,10 +690,33 @@ export default function Canvas() {
       if (!contextMenu) return;
       const wire = contextMenu.wireDrop;
       if (wire) {
+        let dataOverrides: Record<string, any> | undefined;
+        if (type === 'pickRandom' || type === 'boolean') {
+          // Pick Random and Boolean adapt to whatever they're wired to — seed
+          // their valueType from the origin port so the new node (and its
+          // edge) is already correctly typed instead of defaulting to image.
+          const storeNode = nodes.find((n) => n.id === wire.originNodeId);
+          if (storeNode?.type) {
+            const originPort =
+              wire.handleType === 'source'
+                ? getNodeOutputs(storeNode.type, storeNode.data as Record<string, any>).find(
+                    (p) => p.id === wire.handleId,
+                  )
+                : getNodeInputs(storeNode.type, storeNode.data).find((p) => p.id === wire.handleId);
+            if (originPort) {
+              dataOverrides = {
+                valueType:
+                  type === 'pickRandom'
+                    ? pickRandomValueTypeForPort(originPort.type)
+                    : booleanValueTypeForPort(originPort.type),
+              };
+            }
+          }
+        }
         addNodeAndConnectFromHandle(
           type,
           { x: contextMenu.flowX, y: contextMenu.flowY },
-          undefined,
+          dataOverrides,
           wire
         );
       } else {
@@ -636,11 +724,11 @@ export default function Canvas() {
       }
       setContextMenu(null);
     },
-    [contextMenu, addNode, addNodeAndConnectFromHandle]
+    [contextMenu, nodes, addNode, addNodeAndConnectFromHandle]
   );
 
   // --- Context menu grouping ---
-  const grouped = Object.values(NODE_TYPE_DEFINITIONS).reduce(
+  const grouped = PLACEABLE_NODE_DEFINITIONS.reduce(
     (acc, def) => {
       if (!acc[def.category]) acc[def.category] = [];
       acc[def.category].push(def);
@@ -697,9 +785,13 @@ export default function Canvas() {
         onNodesChange={isRunning ? undefined : onNodesChange}
         onEdgesChange={isRunning ? undefined : onEdgesChange}
         onConnect={isRunning ? undefined : onConnect}
+        onConnectStart={isRunning ? undefined : onConnectStart}
         onConnectEnd={isRunning ? undefined : onConnectEnd}
         onInit={onInit}
+        onMoveStart={isRunning ? undefined : onMoveStart}
+        onMoveEnd={isRunning ? undefined : onMoveEnd}
         onPaneClick={onPaneClick}
+        onNodeClick={isRunning ? undefined : onNodeClick}
         onEdgeClick={onEdgeClick}
         onPaneContextMenu={onPaneContextMenu}
         onDrop={onDrop}
@@ -725,6 +817,9 @@ export default function Canvas() {
         multiSelectionKeyCode="Shift"
         selectionKeyCode="Shift"
         selectionMode={SelectionMode.Partial}
+        selectionOnDrag
+        panOnDrag={[1]}
+        panActivationKeyCode="Space"
         colorMode="dark"
       >
         <Background gap={16} size={1} />
@@ -732,8 +827,6 @@ export default function Canvas() {
         <Controls />
         <MiniMap nodeStrokeWidth={3} pannable zoomable />
       </ReactFlow>
-
-      <FocusModeCanvasChip />
 
       {isCutting && cutPoints.length > 1 && (
         <svg className="cut-line-overlay">
@@ -751,6 +844,7 @@ export default function Canvas() {
       {contextMenu && (
         <div
           className="context-menu"
+          ref={contextMenuRef}
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           <input
@@ -778,9 +872,11 @@ export default function Canvas() {
                       onClick={() => handleAddFromMenu(def.type)}
                     >
                       <span
-                        className="context-menu-dot"
-                        style={{ background: category?.color }}
-                      />
+                        className="context-menu-icon"
+                        style={{ color: category?.color }}
+                      >
+                        <Icon name={iconForNodeType(def.type, def.category)} size={14} />
+                      </span>
                       {def.label}
                     </div>
                   ))}

@@ -4,7 +4,12 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from paths import COLLECTION_DIR, DB_PATH
+from migrations import MIGRATIONS
+from paths import BACKUP_DIR, COLLECTION_DIR, DB_PATH
+from version import __version__ as APP_VERSION
+
+# Keep this many database backups (see backup_database) and prune older ones.
+MAX_DB_BACKUPS = 3
 
 # When API auth is off, persistence uses this sentinel for unrestricted access.
 LEGACY_OWNER_SENTINEL = '*'
@@ -46,60 +51,124 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-def _column_exists(conn: sqlite3.Connection, table: str, col: str) -> bool:
-    rows = conn.execute(f'PRAGMA table_info({table})').fetchall()
-    return any(r[1] == col for r in rows)
+def _ensure_schema_migrations_table(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version    INTEGER PRIMARY KEY,
+            name       TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )
+    """)
+
+
+def applied_migration_versions(conn: sqlite3.Connection) -> set[int]:
+    _ensure_schema_migrations_table(conn)
+    rows = conn.execute('SELECT version FROM schema_migrations').fetchall()
+    return {row[0] for row in rows}
+
+
+def pending_migrations(conn: sqlite3.Connection) -> list[tuple[int, str, object]]:
+    applied = applied_migration_versions(conn)
+    return [m for m in MIGRATIONS if m[0] not in applied]
+
+
+def run_migrations(conn: sqlite3.Connection) -> list[int]:
+    """Apply every migration not yet recorded, in order.
+
+    Each migration runs in its own transaction and is recorded in
+    schema_migrations only once that transaction commits, so a failure
+    partway through a migration never leaves it marked as applied.
+    """
+    applied_now = []
+    for version, name, fn in pending_migrations(conn):
+        conn.execute('BEGIN')
+        try:
+            fn(conn)
+            conn.execute(
+                'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)',
+                (version, name, datetime.now(timezone.utc).isoformat()),
+            )
+        except Exception:
+            conn.execute('ROLLBACK')
+            raise
+        else:
+            conn.execute('COMMIT')
+        applied_now.append(version)
+    return applied_now
+
+
+def _get_app_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    # app_meta itself ships as migration 2 (see migrations.py), so a database
+    # upgrading from before this existed may not have the table yet. This
+    # bootstrap create is idempotent and does not race with that migration -
+    # both are CREATE TABLE IF NOT EXISTS.
+    conn.execute('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT)')
+    row = conn.execute('SELECT value FROM app_meta WHERE key = ?', (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _set_app_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        'INSERT INTO app_meta (key, value) VALUES (?, ?) '
+        'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        (key, value),
+    )
+
+
+def _prune_old_backups(keep: int = MAX_DB_BACKUPS) -> None:
+    try:
+        names = sorted(
+            f for f in os.listdir(BACKUP_DIR) if f.startswith('spoton-') and f.endswith('.db')
+        )
+    except OSError:
+        return
+    # Sortable timestamp suffix means lexical order is chronological order.
+    for stale in names[:-keep] if keep > 0 else names:
+        try:
+            os.remove(os.path.join(BACKUP_DIR, stale))
+        except OSError:
+            pass
+
+
+def backup_database(from_version: str) -> str | None:
+    """Snapshot spoton.db before a risky change, via SQLite's own backup API
+    rather than a plain file copy - a file copy can miss data that is still
+    sitting in the -wal file under WAL mode, which this database always
+    runs in. Returns the backup path, or None if there is no real database
+    yet to protect (a brand-new, still-empty install).
+    """
+    if not os.path.exists(DB_PATH) or os.path.getsize(DB_PATH) == 0:
+        return None
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    safe_version = ''.join(c if c.isalnum() or c in '.-' else '_' for c in from_version)
+    dest_path = os.path.join(BACKUP_DIR, f'spoton-{safe_version}-{stamp}.db')
+    src = sqlite3.connect(DB_PATH)
+    try:
+        dest = sqlite3.connect(dest_path)
+        try:
+            src.backup(dest)
+        finally:
+            dest.close()
+    finally:
+        src.close()
+    _prune_old_backups()
+    return dest_path
 
 
 def init_db():
     conn = _get_conn()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS workflows (
-            id         TEXT PRIMARY KEY,
-            name       TEXT NOT NULL DEFAULT 'Untitled Workflow',
-            data       TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS collection (
-            id          TEXT PRIMARY KEY,
-            workflow_id TEXT,
-            filename    TEXT NOT NULL,
-            width       INTEGER,
-            height      INTEGER,
-            created_at  TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS user_secrets (
-            uid TEXT PRIMARY KEY,
-            gemini_api_key TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS collection_folders (
-            id         TEXT PRIMARY KEY,
-            name       TEXT NOT NULL,
-            owner_uid  TEXT,
-            created_at TEXT NOT NULL
-        );
-    """)
-    if not _column_exists(conn, 'workflows', 'owner_uid'):
-        conn.execute('ALTER TABLE workflows ADD COLUMN owner_uid TEXT')
-    if not _column_exists(conn, 'collection', 'owner_uid'):
-        conn.execute('ALTER TABLE collection ADD COLUMN owner_uid TEXT')
-    if not _column_exists(conn, 'workflows', 'icon_id'):
-        conn.execute('ALTER TABLE workflows ADD COLUMN icon_id TEXT')
-    if not _column_exists(conn, 'workflows', 'description'):
-        conn.execute('ALTER TABLE workflows ADD COLUMN description TEXT')
-    if not _column_exists(conn, 'workflows', 'icon_color'):
-        conn.execute('ALTER TABLE workflows ADD COLUMN icon_color TEXT')
-    if not _column_exists(conn, 'workflows', 'has_template'):
-        conn.execute('ALTER TABLE workflows ADD COLUMN has_template INTEGER NOT NULL DEFAULT 0')
-    if not _column_exists(conn, 'collection', 'folder_id'):
-        conn.execute('ALTER TABLE collection ADD COLUMN folder_id TEXT')
-    if not _column_exists(conn, 'user_secrets', 'openai_api_key'):
-        conn.execute('ALTER TABLE user_secrets ADD COLUMN openai_api_key TEXT')
-    if not _column_exists(conn, 'user_secrets', 'fal_api_key'):
-        conn.execute('ALTER TABLE user_secrets ADD COLUMN fal_api_key TEXT')
-    conn.commit()
-    conn.close()
+    # Manual BEGIN/COMMIT below needs autocommit off; sqlite3's own implicit
+    # transaction handling does not wrap DDL the way this runner needs.
+    conn.isolation_level = None
+    try:
+        stored_version = _get_app_meta(conn, 'app_version')
+        if stored_version != APP_VERSION or pending_migrations(conn):
+            backup_database(stored_version or 'unknown')
+        run_migrations(conn)
+        _set_app_meta(conn, 'app_version', APP_VERSION)
+    finally:
+        conn.close()
 
 
 def vacuum_if_bloated(min_free_pages: int = 256) -> bool:
@@ -122,6 +191,45 @@ def vacuum_if_bloated(min_free_pages: int = 256) -> bool:
         return False
     finally:
         conn.close()
+
+
+def sweep_orphaned_uploads(upload_dir: str, prefix: str) -> int:
+    """Delete prefixed upload files that no saved workflow references any more.
+
+    Preview assets are named after the workflow and node that own them, so
+    deleting a node or a whole workflow leaves its file behind with nothing to
+    clean it up. Only files carrying `prefix` are considered, which keeps
+    imported images — whose ids are plain uuids — permanently out of scope.
+
+    Startup-only: it assumes no workflow is mid-edit with an uploaded preview
+    that hasn't been autosaved yet.
+    """
+    if not os.path.isdir(upload_dir):
+        return 0
+    try:
+        names = [n for n in os.listdir(upload_dir) if n.startswith(prefix)]
+    except OSError:
+        return 0
+    if not names:
+        return 0
+
+    conn = _get_conn()
+    try:
+        graphs = [row[0] or '' for row in conn.execute('SELECT data FROM workflows')]
+    finally:
+        conn.close()
+
+    removed = 0
+    for name in names:
+        stem = name.split('.', 1)[0]
+        if any(stem in graph for graph in graphs):
+            continue
+        try:
+            os.remove(os.path.join(upload_dir, name))
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def _now_iso() -> str:
@@ -309,6 +417,45 @@ def delete_workflow(wf_id: str, owner_uid: str = LEGACY_OWNER_SENTINEL) -> bool:
     return cursor.rowcount > 0
 
 
+def _insert_collection_row(
+    item_id: str,
+    filename: str,
+    kind: str,
+    thumb_filename: str | None,
+    workflow_id: str | None,
+    width: int | None,
+    height: int | None,
+    owner_uid: str | None,
+    prompt: str | None,
+    seed: int | None,
+    model: str | None,
+) -> dict:
+    now = _now_iso()
+    conn = _get_conn()
+    conn.execute(
+        'INSERT INTO collection (id, workflow_id, filename, width, height, created_at, owner_uid, folder_id, prompt, seed, model, kind, thumb_filename) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)',
+        (
+            item_id, workflow_id, filename, width, height, now, owner_uid,
+            prompt, seed, model, kind, thumb_filename,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        'id': item_id,
+        'filename': filename,
+        'kind': kind,
+        'has_thumb': bool(thumb_filename),
+        'width': width,
+        'height': height,
+        'created_at': now,
+        'prompt': prompt,
+        'seed': seed,
+        'model': model,
+    }
+
+
 def add_to_collection(
     image_bytes: bytes,
     ext: str = 'png',
@@ -316,6 +463,9 @@ def add_to_collection(
     width: int | None = None,
     height: int | None = None,
     owner_uid: str | None = None,
+    prompt: str | None = None,
+    seed: int | None = None,
+    model: str | None = None,
 ) -> dict:
     img_id = str(uuid.uuid4())
     filename = f'{img_id}.{ext}'
@@ -324,22 +474,44 @@ def add_to_collection(
     with open(filepath, 'wb') as f:
         f.write(image_bytes)
 
-    now = _now_iso()
-    conn = _get_conn()
-    conn.execute(
-        'INSERT INTO collection (id, workflow_id, filename, width, height, created_at, owner_uid, folder_id) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, NULL)',
-        (img_id, workflow_id, filename, width, height, now, owner_uid),
+    return _insert_collection_row(
+        img_id, filename, 'image', None, workflow_id, width, height,
+        owner_uid, prompt, seed, model,
     )
-    conn.commit()
-    conn.close()
-    return {
-        'id': img_id,
-        'filename': filename,
-        'width': width,
-        'height': height,
-        'created_at': now,
-    }
+
+
+def add_model_to_collection(
+    model_bytes: bytes,
+    ext: str = 'glb',
+    thumb_bytes: bytes | None = None,
+    thumb_ext: str = 'png',
+    workflow_id: str | None = None,
+    owner_uid: str | None = None,
+    prompt: str | None = None,
+    seed: int | None = None,
+    model: str | None = None,
+) -> dict:
+    """Store a generated mesh as a collection item.
+
+    The mesh is copied into the collection rather than referenced in
+    `MODELS_DIR`, so deleting a collection item can never pull the GLB out from
+    under a saved workflow that still renders it.
+    """
+    item_id = str(uuid.uuid4())
+    filename = f'{item_id}.{ext}'
+    with open(os.path.join(COLLECTION_DIR, filename), 'wb') as f:
+        f.write(model_bytes)
+
+    thumb_filename = None
+    if thumb_bytes:
+        thumb_filename = f'{item_id}_thumb.{thumb_ext}'
+        with open(os.path.join(COLLECTION_DIR, thumb_filename), 'wb') as f:
+            f.write(thumb_bytes)
+
+    return _insert_collection_row(
+        item_id, filename, 'model3d', thumb_filename, workflow_id, None, None,
+        owner_uid, prompt, seed, model,
+    )
 
 
 def _collection_row_public(d: dict) -> dict:
@@ -348,18 +520,27 @@ def _collection_row_public(d: dict) -> dict:
         'id': d['id'],
         'workflow_id': d.get('workflow_id'),
         'filename': d['filename'],
+        'kind': d.get('kind') or 'image',
+        'has_thumb': bool(d.get('thumb_filename')),
         'width': d.get('width'),
         'height': d.get('height'),
         'created_at': d['created_at'],
         'folder_id': d.get('folder_id'),
+        'prompt': d.get('prompt'),
+        'seed': d.get('seed'),
+        'model': d.get('model'),
     }
+
+
+_COLLECTION_SELECT = (
+    'SELECT id, workflow_id, filename, width, height, created_at, folder_id, '
+    'prompt, seed, model, kind, thumb_filename FROM collection '
+)
 
 
 def _legacy_list_collection(in_folder_id: str | None = None) -> list[dict]:
     conn = _get_conn()
-    sel = (
-        'SELECT id, workflow_id, filename, width, height, created_at, folder_id FROM collection '
-    )
+    sel = _COLLECTION_SELECT
     if in_folder_id is None:
         rows = conn.execute(sel + 'WHERE folder_id IS NULL ORDER BY created_at DESC').fetchall()
     else:
@@ -378,9 +559,7 @@ def list_collection(
     if owner_uid == LEGACY_OWNER_SENTINEL:
         return _legacy_list_collection(in_folder_id)
     conn = _get_conn()
-    sel = (
-        'SELECT id, workflow_id, filename, width, height, created_at, folder_id FROM collection '
-    )
+    sel = _COLLECTION_SELECT
     if in_folder_id is None:
         rows = conn.execute(
             sel + 'WHERE owner_uid = ? AND folder_id IS NULL ORDER BY created_at DESC',
@@ -587,7 +766,7 @@ def get_collection_item(img_id: str, owner_uid: str = LEGACY_OWNER_SENTINEL) -> 
 def delete_collection_item(img_id: str, owner_uid: str = LEGACY_OWNER_SENTINEL) -> bool:
     conn = _get_conn()
     row = conn.execute(
-        'SELECT filename, owner_uid FROM collection WHERE id = ?', (img_id,)
+        'SELECT filename, thumb_filename, owner_uid FROM collection WHERE id = ?', (img_id,)
     ).fetchone()
     if not row:
         conn.close()
@@ -596,9 +775,12 @@ def delete_collection_item(img_id: str, owner_uid: str = LEGACY_OWNER_SENTINEL) 
         conn.close()
         return False
 
-    filepath = os.path.join(COLLECTION_DIR, row['filename'])
-    if os.path.exists(filepath):
-        os.remove(filepath)
+    for name in (row['filename'], row['thumb_filename']):
+        if not name:
+            continue
+        filepath = os.path.join(COLLECTION_DIR, name)
+        if os.path.exists(filepath):
+            os.remove(filepath)
 
     conn.execute('DELETE FROM collection WHERE id = ?', (img_id,))
     conn.commit()
@@ -614,106 +796,27 @@ def get_collection_filepath(img_id: str, owner_uid: str = LEGACY_OWNER_SENTINEL)
     return path if os.path.exists(path) else None
 
 
+def get_collection_thumb_filepath(
+    img_id: str, owner_uid: str = LEGACY_OWNER_SENTINEL
+) -> str | None:
+    """Path to the picture that represents an item in the grid: the separate
+    thumbnail when there is one (meshes), otherwise the item file itself."""
+    row = get_collection_item(img_id, owner_uid)
+    if not row:
+        return None
+    name = row.get('thumb_filename')
+    if not name:
+        # A mesh without a thumbnail has no picture at all — never fall back to
+        # its GLB, which the caller would try to decode as an image.
+        if (row.get('kind') or 'image') != 'image':
+            return None
+        name = row['filename']
+    path = os.path.join(COLLECTION_DIR, name)
+    return path if os.path.exists(path) else None
+
+
 def _secret_nonempty(val: str | None) -> bool:
     return bool(val and str(val).strip())
-
-
-def get_user_gemini_key_sqlite(uid: str) -> str | None:
-    conn = _get_conn()
-    row = conn.execute(
-        'SELECT gemini_api_key FROM user_secrets WHERE uid = ?', (uid,)
-    ).fetchone()
-    conn.close()
-    if not row:
-        return None
-    k = row['gemini_api_key']
-    return k if _secret_nonempty(k) else None
-
-
-def set_user_gemini_key_sqlite(uid: str, api_key: str) -> None:
-    conn = _get_conn()
-    row = conn.execute(
-        'SELECT uid FROM user_secrets WHERE uid = ?', (uid,)
-    ).fetchone()
-    if row:
-        conn.execute(
-            'UPDATE user_secrets SET gemini_api_key = ? WHERE uid = ?',
-            (api_key, uid),
-        )
-    else:
-        conn.execute(
-            'INSERT INTO user_secrets (uid, gemini_api_key, openai_api_key, fal_api_key) '
-            'VALUES (?, ?, NULL, NULL)',
-            (uid, api_key),
-        )
-    conn.commit()
-    conn.close()
-
-
-def clear_user_gemini_key_sqlite(uid: str) -> None:
-    conn = _get_conn()
-    conn.execute(
-        "UPDATE user_secrets SET gemini_api_key = '' WHERE uid = ?",
-        (uid,),
-    )
-    conn.execute(
-        """DELETE FROM user_secrets WHERE uid = ?
-           AND IFNULL(TRIM(gemini_api_key), '') = ''
-           AND IFNULL(TRIM(openai_api_key), '') = ''
-           AND IFNULL(TRIM(fal_api_key), '') = ''""",
-        (uid,),
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_user_openai_key_sqlite(uid: str) -> str | None:
-    conn = _get_conn()
-    row = conn.execute(
-        'SELECT openai_api_key FROM user_secrets WHERE uid = ?', (uid,)
-    ).fetchone()
-    conn.close()
-    if not row:
-        return None
-    k = row['openai_api_key']
-    return k if _secret_nonempty(k) else None
-
-
-def set_user_openai_key_sqlite(uid: str, api_key: str) -> None:
-    conn = _get_conn()
-    row = conn.execute(
-        'SELECT uid FROM user_secrets WHERE uid = ?', (uid,)
-    ).fetchone()
-    if row:
-        conn.execute(
-            'UPDATE user_secrets SET openai_api_key = ? WHERE uid = ?',
-            (api_key, uid),
-        )
-    else:
-        conn.execute(
-            'INSERT INTO user_secrets (uid, gemini_api_key, openai_api_key, fal_api_key) '
-            'VALUES (?, ?, ?, NULL)',
-            (uid, '', api_key),
-        )
-    conn.commit()
-    conn.close()
-
-
-def clear_user_openai_key_sqlite(uid: str) -> None:
-    conn = _get_conn()
-    conn.execute(
-        'UPDATE user_secrets SET openai_api_key = NULL WHERE uid = ?',
-        (uid,),
-    )
-    conn.execute(
-        """DELETE FROM user_secrets WHERE uid = ?
-           AND IFNULL(TRIM(gemini_api_key), '') = ''
-           AND IFNULL(TRIM(openai_api_key), '') = ''
-           AND IFNULL(TRIM(fal_api_key), '') = ''""",
-        (uid,),
-    )
-    conn.commit()
-    conn.close()
 
 
 def get_user_fal_key_sqlite(uid: str) -> str | None:
@@ -740,9 +843,8 @@ def set_user_fal_key_sqlite(uid: str, api_key: str) -> None:
         )
     else:
         conn.execute(
-            'INSERT INTO user_secrets (uid, gemini_api_key, openai_api_key, fal_api_key) '
-            'VALUES (?, ?, NULL, ?)',
-            (uid, '', api_key),
+            'INSERT INTO user_secrets (uid, fal_api_key) VALUES (?, ?)',
+            (uid, api_key),
         )
     conn.commit()
     conn.close()
@@ -750,16 +852,6 @@ def set_user_fal_key_sqlite(uid: str, api_key: str) -> None:
 
 def clear_user_fal_key_sqlite(uid: str) -> None:
     conn = _get_conn()
-    conn.execute(
-        'UPDATE user_secrets SET fal_api_key = NULL WHERE uid = ?',
-        (uid,),
-    )
-    conn.execute(
-        """DELETE FROM user_secrets WHERE uid = ?
-           AND IFNULL(TRIM(gemini_api_key), '') = ''
-           AND IFNULL(TRIM(openai_api_key), '') = ''
-           AND IFNULL(TRIM(fal_api_key), '') = ''""",
-        (uid,),
-    )
+    conn.execute('DELETE FROM user_secrets WHERE uid = ?', (uid,))
     conn.commit()
     conn.close()

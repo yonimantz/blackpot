@@ -1,13 +1,13 @@
-import { fetchCollectionImageBlob } from './api';
+import { fetchCollectionThumbBlob } from './api';
 
 const urlById = new Map<string, Promise<string>>();
 
-/** Session-persistent object URL for a collection image (fetched at most once per id). */
+/** Session-persistent object URL for a collection item's picture (fetched at most once per id). */
 export function getCollectionImageObjectUrl(imageId: string): Promise<string> {
   let pending = urlById.get(imageId);
   if (!pending) {
     pending = (async () => {
-      const blob = await fetchCollectionImageBlob(imageId);
+      const blob = await fetchCollectionThumbBlob(imageId);
       return URL.createObjectURL(blob);
     })();
     urlById.set(imageId, pending);

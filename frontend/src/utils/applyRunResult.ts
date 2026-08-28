@@ -23,16 +23,25 @@ export function applyNodeResult(
       typeof result?.image === 'string' && result.image.length > 0
         ? (result.image as string)
         : null;
+    // Live upstream only — this node just produced a fresh result, so a saved
+    // preview from an earlier session must not be picked over it.
     const upstream = getConnectedImageDataUrl(
       node.id,
       'image',
       store.edges,
       store.nodes,
+      { includeSaved: false },
     );
     const finalImg = upstream || ssrcImg;
     if (finalImg) {
       store.lockPreviewNodeSize(node.id);
-      store.updateNodeData(node.id, { previewData: finalImg });
+      const patch: Record<string, unknown> = { previewData: finalImg };
+      if (result._meta && typeof result._meta === 'object') {
+        patch.previewMeta = result._meta;
+      } else {
+        patch.previewMeta = null;
+      }
+      store.updateNodeData(node.id, patch);
     }
     return;
   }
@@ -45,11 +54,42 @@ export function applyNodeResult(
   if (node.type === 'vignette' && result.image) {
     store.updateNodeData(node.id, { _vignettePreview: result.image });
   }
+  if (node.type === 'adjustments' && result.image) {
+    store.updateNodeData(node.id, { _adjustmentsPreview: result.image });
+  }
   if (node.type === 'stackImages' && result.image) {
     store.updateNodeData(node.id, { _stackPreview: result.image });
   }
-  if (node.type === 'exportImage') {
+  if (node.type === 'pickRandom') {
+    const out = result.out;
+    const isImg = typeof out === 'string' && out.startsWith('data:');
+    store.updateNodeData(node.id, { _result: isImg ? { ...result, image: out } : result });
+    return;
+  }
+  if (node.type === 'boolean') {
+    const out = result.value;
+    const isImg = typeof out === 'string' && out.startsWith('data:');
+    store.updateNodeData(node.id, { _result: isImg ? { ...result, image: out } : result });
+    return;
+  }
+  if (node.type === 'exportImage' || node.type === 'export3d') {
     // Export is on-demand only — normal run is a no-op.
+  } else if (node.type === 'imageTo3d' || node.type === 'preview3d') {
+    // Keep the mesh id on the node (not only in `_result`): `_`-prefixed
+    // fields are stripped on save, so without this Preview 3D / Image to 3D
+    // come back empty after a tab switch or app restart. The GLB itself
+    // already lives in MODELS_DIR under this asset id.
+    const model = result?.model;
+    const assetId =
+      model && typeof model === 'object' && typeof model.assetId === 'string'
+        ? (model.assetId as string)
+        : '';
+    const patch: Record<string, unknown> = { _result: result };
+    if (assetId) {
+      patch.modelAssetId = assetId;
+      if (typeof model.sizeBytes === 'number') patch.sizeBytes = model.sizeBytes;
+    }
+    store.updateNodeData(node.id, patch);
   } else if (result.image && node.type !== 'preview') {
     store.updateNodeData(node.id, { _result: result });
   } else if (

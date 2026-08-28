@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import type { FieldSpec, PlaygroundModelEntry } from '../constants/playgroundModels';
+import Icon from '../icons/Icon';
+
+import type { FieldSpec } from '../constants/playgroundModels';
 
 import {
 
@@ -202,21 +204,6 @@ function PlaygroundFieldRenderer({
 
 
 
-function visibleFields(model: PlaygroundModelEntry, params: Record<string, unknown>): FieldSpec[] {
-
-  if (model.id !== 'gptImage2') return model.fields;
-
-  const fmt = String(params.outputFormat ?? 'png');
-
-  const showCompression = fmt === 'jpeg' || fmt === 'webp';
-
-  return model.fields.filter(
-
-    (f) => f.key !== 'outputCompression' || showCompression,
-
-  );
-
-}
 
 
 
@@ -290,7 +277,17 @@ export default function PlaygroundPage() {
 
 
 
-  const fields = useMemo(() => visibleFields(model, params), [model, params]);
+  const fields = model.fields;
+
+
+
+  // Image-variation endpoints accept no prompt; edit endpoints cannot run without a reference.
+
+  const usesPrompt = !isTemplateMode && model.promptSupported !== false;
+
+  const missingRequiredRef =
+
+    !isTemplateMode && model.refsRequired === true && references.length === 0;
 
 
 
@@ -1064,7 +1061,7 @@ export default function PlaygroundPage() {
 
                           >
 
-                            ×
+                            <Icon name="close-line" size={12} />
 
                           </button>
 
@@ -1090,7 +1087,7 @@ export default function PlaygroundPage() {
 
         <main className="playground-main">
 
-          {!isTemplateMode ? (
+          {usesPrompt ? (
 
             <div className="playground-prompt-bar">
 
@@ -1160,7 +1157,9 @@ export default function PlaygroundPage() {
 
                 templateLoading ||
 
-                (!isTemplateMode && !prompt.trim())
+                (usesPrompt && !prompt.trim()) ||
+
+                missingRequiredRef
 
               }
 
@@ -1177,6 +1176,16 @@ export default function PlaygroundPage() {
             </button>
 
           </div>
+
+          {missingRequiredRef ? (
+
+            <div className="playground-status">
+
+              This model requires a reference image — add one to generate.
+
+            </div>
+
+          ) : null}
 
           {statusText ? <div className="playground-status">{statusText}</div> : null}
 

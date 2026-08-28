@@ -5,6 +5,8 @@ import {
   DEFAULT_WORKFLOW_ICON_ID,
   WORKFLOW_ICON_PALETTE,
 } from '../constants/workflowIcons';
+import { buildStarterWorkflowData } from '../utils/starterWorkflow';
+import Icon from '../icons/Icon';
 
 export type WorkflowMetaSaved = {
   name: string;
@@ -72,7 +74,13 @@ export default function WorkflowMetaModal({
           icon_color: colorNorm,
           description: desc,
         });
-        onCreated?.(wf);
+        const data = buildStarterWorkflowData();
+        try {
+          await saveWorkflow(wf.id, { data });
+          onCreated?.({ ...wf, data });
+        } catch {
+          onCreated?.(wf);
+        }
         onClose();
       } else {
         if (!workflowId) {
@@ -104,16 +112,28 @@ export default function WorkflowMetaModal({
   if (!open) return null;
 
   return (
-    <div className="confirm-overlay" onClick={() => !busy && onClose()}>
+    <div className="confirm-overlay">
       <div
         className="confirm-dialog workflow-meta-dialog"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-labelledby="workflow-meta-title"
       >
-        <h2 id="workflow-meta-title" className="workflow-meta-title">
-          {mode === 'create' ? 'New workflow' : 'Workflow details'}
-        </h2>
+        <div className="workflow-meta-header">
+          <h2 id="workflow-meta-title" className="workflow-meta-title">
+            {mode === 'create' ? 'New workflow' : 'Workflow details'}
+          </h2>
+          <button
+            type="button"
+            className="compositor-modal-close"
+            onClick={onClose}
+            disabled={busy}
+            aria-label="Close"
+            title="Close"
+          >
+            <Icon name="close-line" size={18} />
+          </button>
+        </div>
 
         <label className="workflow-meta-label">
           Name

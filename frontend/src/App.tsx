@@ -7,6 +7,7 @@ import WorkflowEditor from './pages/WorkflowEditor';
 import SettingsPage from './pages/SettingsPage';
 import PlaygroundPage from './pages/PlaygroundPage';
 import './App.css';
+import './styles/cursors.css';
 
 export default function App() {
   return (

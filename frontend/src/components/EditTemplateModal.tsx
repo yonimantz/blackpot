@@ -11,6 +11,7 @@ import {
   type WorkflowTemplateOutput,
 } from '../types/templateTypes';
 import TemplateFieldRenderer from './TemplateFieldRenderer';
+import Icon from '../icons/Icon';
 
 function swapAt<T>(arr: T[], i: number, j: number): T[] {
   if (i < 0 || j < 0 || i >= arr.length || j >= arr.length) return arr;
@@ -210,7 +211,7 @@ export default function EditTemplateModal({
                         aria-label="Move up"
                         onClick={() => setDraftItems((items) => swapAt(items, i, i - 1))}
                       >
-                        ▲
+                        <Icon name="up-small-line" size={13} />
                       </button>
                       <button
                         type="button"
@@ -219,7 +220,7 @@ export default function EditTemplateModal({
                         aria-label="Move down"
                         onClick={() => setDraftItems((items) => swapAt(items, i, i + 1))}
                       >
-                        ▼
+                        <Icon name="down-small-line" size={13} />
                       </button>
                     </div>
                     <span
@@ -263,7 +264,7 @@ export default function EditTemplateModal({
                         disabled={busy}
                         onClick={() => unpinNode(item.nodeId)}
                       >
-                        ×
+                        <Icon name="close-line" size={12} />
                       </button>
                     </div>
                     </div>
@@ -313,7 +314,7 @@ export default function EditTemplateModal({
                         aria-label="Move up"
                         onClick={() => setDraftOutputs((outs) => swapAt(outs, i, i - 1))}
                       >
-                        ▲
+                        <Icon name="up-small-line" size={13} />
                       </button>
                       <button
                         type="button"
@@ -322,7 +323,7 @@ export default function EditTemplateModal({
                         aria-label="Move down"
                         onClick={() => setDraftOutputs((outs) => swapAt(outs, i, i + 1))}
                       >
-                        ▼
+                        <Icon name="down-small-line" size={13} />
                       </button>
                     </div>
                     <span
@@ -348,7 +349,7 @@ export default function EditTemplateModal({
                       disabled={busy}
                       onClick={() => unpinNode(out.nodeId)}
                     >
-                      ×
+                      <Icon name="close-line" size={12} />
                     </button>
                   </li>
                 );

@@ -1,0 +1,1232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SpotOn Guide</title>
+<meta name="description" content="The complete guide to SpotOn — nodes, tools, workflows and answers." />
+<link rel="icon" href="assets/spoton-guide/SpotOn-Icon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --accent-rgb: 99, 102, 241;
+    --bg-dark: #111113;
+    --bg-panel: #18181b;
+    --bg-node: #1e1e21;
+    --bg-input: #131315;
+    --bg-elevated: #202024;
+    --border: #27272a;
+    --border-subtle: #1f1f22;
+    --text: #e4e4e7;
+    --text-dim: #a1a1aa;
+    --text-faint: #71717a;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --accent-soft: #4f46e5;
+    --accent-muted: rgba(var(--accent-rgb), 0.14);
+    --danger: #ef4444;
+    --success: #22c55e;
+    --warn: #f59e0b;
+    --cat-general: #9ca3af;
+    --cat-io: #3b82f6;
+    --cat-tool: #f59e0b;
+    --cat-text: #14b8a6;
+    --cat-value: #8b5cf6;
+    --cat-read: #22c55e;
+    --cat-ai: #ec4899;
+    --r-sm: 6px;
+    --r-md: 10px;
+    --r-lg: 16px;
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
+    --header-h: 60px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: 'Fredoka', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg-dark);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  a { color: var(--accent-hover); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  img { max-width: 100%; display: block; }
+
+  code, kbd {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 0.92em;
+  }
+
+  code {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.1em 0.4em;
+    color: #fca5a5;
+  }
+
+  kbd {
+    background: var(--bg-node);
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 2px 7px;
+    color: var(--text);
+    font-size: 0.85em;
+    white-space: nowrap;
+  }
+
+  /* ===== Header ===== */
+  .site-header {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: var(--header-h);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 20px;
+    background: rgba(17, 17, 19, 0.92);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+    z-index: 500;
+  }
+
+  .brand { display: flex; align-items: center; gap: 10px; flex: none; }
+  .brand img { height: 22px; width: auto; }
+  .brand .badge {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    background: var(--bg-node);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 9px;
+  }
+
+  .nav-toggle {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 36px; height: 36px;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--border);
+    background: var(--bg-node);
+    color: var(--text);
+    cursor: pointer;
+    flex: none;
+  }
+
+  .header-search { flex: 1; max-width: 360px; margin-left: auto; position: relative; }
+  .header-search input {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    color: var(--text);
+    padding: 9px 12px 9px 34px;
+    font: inherit;
+    font-size: 13px;
+  }
+  .header-search input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
+  .header-search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-faint); pointer-events: none; }
+
+  .header-tagline { color: var(--text-faint); font-size: 13px; white-space: nowrap; }
+
+  /* ===== Layout ===== */
+  .shell {
+    display: flex;
+    padding-top: var(--header-h);
+    min-height: 100vh;
+  }
+
+  .toc-backdrop {
+    display: none;
+    position: fixed;
+    inset: var(--header-h) 0 0 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 400;
+  }
+
+  aside.toc {
+    width: 280px;
+    flex: none;
+    position: fixed;
+    top: var(--header-h);
+    left: 0;
+    bottom: 0;
+    overflow-y: auto;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border);
+    padding: 18px 10px 40px;
+    z-index: 450;
+  }
+
+  aside.toc h4 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-faint);
+    padding: 16px 12px 6px;
+  }
+  aside.toc h4:first-of-type { padding-top: 4px; }
+
+  aside.toc ul { list-style: none; }
+  aside.toc a {
+    display: block;
+    padding: 7px 12px;
+    border-radius: var(--r-sm);
+    color: var(--text-dim);
+    font-size: 13.5px;
+    line-height: 1.35;
+  }
+  aside.toc a:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); text-decoration: none; }
+  aside.toc a.active { background: var(--accent-muted); color: var(--accent-hover); font-weight: 500; }
+  aside.toc .sub a { padding-left: 24px; font-size: 13px; }
+  aside.toc .no-match { display: none !important; }
+
+  main {
+    flex: 1;
+    margin-left: 280px;
+    padding: 0 24px 100px;
+    max-width: 900px;
+  }
+
+  .content-inner { padding-top: 8px; }
+
+  /* ===== Hero ===== */
+  .hero {
+    padding: 48px 0 28px;
+    border-bottom: 1px solid var(--border-subtle);
+    margin-bottom: 36px;
+  }
+  .hero h1 { font-size: 34px; font-weight: 700; margin-bottom: 10px; }
+  .hero p.lead { color: var(--text-dim); font-size: 16px; max-width: 640px; }
+  .hero .pills { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+  .pill {
+    font-size: 12.5px;
+    color: var(--text-dim);
+    background: var(--bg-node);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 11px;
+  }
+
+  /* ===== Sections ===== */
+  section { margin-bottom: 56px; scroll-margin-top: calc(var(--header-h) + 12px); }
+  section h2 {
+    font-size: 24px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    scroll-margin-top: calc(var(--header-h) + 12px);
+  }
+  section > p.section-intro { color: var(--text-dim); margin: 14px 0 20px; }
+
+  h3 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 30px 0 10px;
+    scroll-margin-top: calc(var(--header-h) + 12px);
+  }
+  h3:first-of-type { margin-top: 22px; }
+
+  h3.cat-heading {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 15px;
+    font-weight: 600;
+    margin: 26px 0 10px;
+    scroll-margin-top: calc(var(--header-h) + 12px);
+  }
+  .cat-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+
+  p { margin-bottom: 12px; }
+  ul, ol { margin: 0 0 14px 22px; }
+  li { margin-bottom: 6px; }
+
+  strong { color: #fff; font-weight: 600; }
+
+  .callout {
+    background: var(--bg-node);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--r-md);
+    padding: 14px 16px;
+    margin: 16px 0;
+    font-size: 14px;
+    color: var(--text-dim);
+  }
+  .callout strong { color: var(--text); }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.tip { border-left-color: var(--success); }
+
+  /* ===== Figures ===== */
+  figure {
+    margin: 18px 0 24px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    padding: 10px;
+  }
+  figure img { border-radius: var(--r-md); border: 1px solid var(--border-subtle); }
+  figure figcaption {
+    font-size: 13px;
+    color: var(--text-faint);
+    padding: 10px 6px 2px;
+  }
+
+  /* ===== Steps ===== */
+  .steps { list-style: none; margin-left: 0; counter-reset: step; }
+  .steps li {
+    position: relative;
+    padding-left: 40px;
+    margin-bottom: 16px;
+  }
+  .steps li::before {
+    counter-increment: step;
+    content: counter(step);
+    position: absolute;
+    left: 0; top: 0;
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    background: var(--accent-muted);
+    color: var(--accent-hover);
+    font-weight: 600;
+    font-size: 13px;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  /* ===== Tables ===== */
+  table { width: 100%; border-collapse: collapse; margin: 14px 0 22px; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
+  th { color: var(--text-faint); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+  tr:hover td { background: rgba(255, 255, 255, 0.02); }
+
+  /* ===== Node cards ===== */
+  details.node-card {
+    background: var(--bg-node);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    margin-bottom: 8px;
+    overflow: hidden;
+  }
+  details.node-card summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 500;
+    font-size: 14.5px;
+  }
+  details.node-card summary::-webkit-details-marker { display: none; }
+  details.node-card summary::after {
+    content: '';
+    width: 8px; height: 8px;
+    border-right: 2px solid var(--text-faint);
+    border-bottom: 2px solid var(--text-faint);
+    transform: rotate(-45deg);
+    margin-left: auto;
+    transition: transform 0.15s;
+  }
+  details.node-card[open] summary::after { transform: rotate(45deg); }
+  details.node-card summary .node-teaser {
+    color: var(--text-faint);
+    font-weight: 400;
+    font-size: 13px;
+    margin-left: 4px;
+  }
+  details.node-card .node-body {
+    padding: 0 14px 16px 38px;
+    color: var(--text-dim);
+    font-size: 13.8px;
+  }
+  details.node-card .node-body p:last-child { margin-bottom: 0; }
+  details.node-card .node-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0 2px 38px;
+  }
+  .tag {
+    font-size: 11.5px;
+    color: var(--text-faint);
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 9px;
+  }
+  .cat-bar { width: 3px; align-self: stretch; border-radius: 3px; flex: none; }
+
+  /* ===== FAQ ===== */
+  details.faq {
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 4px 0;
+  }
+  details.faq summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 12px 4px;
+    font-weight: 500;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+  }
+  details.faq summary::-webkit-details-marker { display: none; }
+  details.faq summary::before { content: 'Q.'; color: var(--accent-hover); flex: none; font-weight: 700; }
+  details.faq .faq-a { padding: 0 4px 14px 26px; color: var(--text-dim); font-size: 14px; }
+
+  /* ===== Shortcut kbd rows ===== */
+  .kbd-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+
+  /* ===== Back to top ===== */
+  #back-to-top {
+    position: fixed;
+    right: 22px;
+    bottom: 22px;
+    width: 42px; height: 42px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: var(--shadow-md);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s;
+    z-index: 480;
+  }
+  #back-to-top.visible { opacity: 1; pointer-events: auto; }
+  #back-to-top:hover { background: var(--accent-hover); }
+
+  footer.site-footer {
+    border-top: 1px solid var(--border-subtle);
+    padding: 26px 0 60px;
+    color: var(--text-faint);
+    font-size: 13px;
+  }
+
+  /* ===== Responsive ===== */
+  @media (max-width: 900px) {
+    .nav-toggle { display: flex; }
+    .header-tagline { display: none; }
+    aside.toc {
+      transform: translateX(-100%);
+      transition: transform 0.2s ease;
+      width: 280px;
+    }
+    body.nav-open aside.toc { transform: translateX(0); box-shadow: var(--shadow-md); }
+    body.nav-open .toc-backdrop { display: block; }
+    main { margin-left: 0; padding: 0 16px 90px; }
+    .hero h1 { font-size: 27px; }
+  }
+
+  @media (max-width: 560px) {
+    .header-search { max-width: 140px; }
+    details.node-card .node-body,
+    details.node-card .node-meta { padding-left: 14px; margin-left: 0; }
+  }
+
+  /* ===== Print ===== */
+  @media print {
+    :root {
+      --bg-dark: #fff;
+      --bg-panel: #f4f4f5;
+      --bg-node: #f4f4f5;
+      --bg-input: #eee;
+      --bg-elevated: #eee;
+      --border: #ccc;
+      --border-subtle: #ddd;
+      --text: #111;
+      --text-dim: #333;
+      --text-faint: #555;
+      --accent-hover: #3730a3;
+      --accent-muted: #eef;
+    }
+    .site-header, aside.toc, .toc-backdrop, #back-to-top { display: none !important; }
+    main { margin-left: 0; max-width: 100%; padding: 0 20px; }
+    body { background: #fff; color: #111; }
+    a { text-decoration: underline; }
+    strong { color: #000; }
+    .hero, figure, details.node-card, .callout, .pill, .tag, code, kbd { border-color: #ccc; background: #f4f4f5; }
+    section { page-break-inside: avoid; }
+    details.node-card, details.faq { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<header class="site-header">
+  <button class="nav-toggle" id="navToggle" aria-label="Toggle navigation" aria-expanded="false">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+  </button>
+  <div class="brand">
+    <img src="assets/spoton-guide/SpotOn-Logo.svg" alt="SpotOn" />
+    <span class="badge">Guide</span>
+  </div>
+  <span class="header-tagline">Everything you need to build with SpotOn</span>
+  <div class="header-search">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input type="search" id="tocSearch" placeholder="Search the guide…" autocomplete="off" />
+  </div>
+</header>
+
+<div class="toc-backdrop" id="tocBackdrop"></div>
+
+<div class="shell">
+  <aside class="toc" id="tocAside">
+    <nav id="tocNav" aria-label="Guide navigation">
+      <h4>Start here</h4>
+      <ul>
+        <li><a href="#welcome" data-kw="welcome intro overview what is spoton">Welcome</a></li>
+        <li><a href="#quick-start" data-kw="quick start 5 minute first run getting started">5-minute quick start</a></li>
+      </ul>
+
+      <h4>Interface tour</h4>
+      <ul>
+        <li><a href="#tour-projects" data-kw="projects home library workflows cards">Projects</a></li>
+        <li><a href="#tour-editor" data-kw="editor canvas palette nodes tabs">The workflow editor</a></li>
+        <li><a href="#tour-inspector" data-kw="inspector properties panel right side">The Inspector</a></li>
+        <li><a href="#tour-collection" data-kw="collection gallery generated images folders lightbox">Collection</a></li>
+        <li><a href="#tour-playground" data-kw="playground quick generation templates">Playground</a></li>
+        <li><a href="#tour-settings" data-kw="settings api key fal version">Settings</a></li>
+      </ul>
+
+      <h4>Core concepts</h4>
+      <ul>
+        <li><a href="#concept-nodes" data-kw="nodes ports connections types wiring">Nodes &amp; connections</a></li>
+        <li><a href="#concept-running" data-kw="run stop workflow execute streaming">Running &amp; stopping</a></li>
+        <li><a href="#concept-bypass" data-kw="bypass skip m alt+m">Bypass</a></li>
+        <li><a href="#concept-groups" data-kw="groups ctrl+g play subgraph">Groups</a></li>
+        <li><a href="#concept-notes" data-kw="notes comments decorative">Notes</a></li>
+        <li><a href="#concept-templates" data-kw="pin pinning templates playground form set template">Templates &amp; pinning</a></li>
+        <li><a href="#concept-saving" data-kw="save autosave">Saving &amp; autosave</a></li>
+        <li><a href="#concept-files" data-kw="import export blpw workflow file">Import &amp; export files</a></li>
+      </ul>
+
+      <h4>Step-by-step recipes</h4>
+      <ul>
+        <li><a href="#recipe-first-image" data-kw="first image prompt fal ai preview recipe">Your first image</a></li>
+        <li><a href="#recipe-editing" data-kw="editing compositing editor compositor remove background key color">Editing &amp; compositing</a></li>
+        <li><a href="#recipe-exporting" data-kw="exporting export image export button">Exporting your work</a></li>
+        <li><a href="#recipe-template" data-kw="build playground template pin">Build a Playground template</a></li>
+        <li><a href="#recipe-3d" data-kw="image to 3d model glb tripo hunyuan">Image to 3D</a></li>
+      </ul>
+
+      <h4>Node reference</h4>
+      <ul>
+        <li><a href="#nodes-general" data-kw="general note">General</a></li>
+        <li><a href="#nodes-text" data-kw="text prompt combine refmapper sketch2final studio">Text</a></li>
+        <li><a href="#nodes-io" data-kw="io import export preview 3d">I/O</a></li>
+        <li><a href="#nodes-tools" data-kw="tools resize crop blur rotate editor compositor vignette remove background key color">Tools</a></li>
+        <li><a href="#nodes-values" data-kw="values number color picker">Values</a></li>
+        <li><a href="#nodes-read" data-kw="read data get channel image size color palette">Read Data</a></li>
+        <li><a href="#nodes-ai" data-kw="ai models fal image scf prompt image to 3d upscaler upscale esrgan clarity">AI Models</a></li>
+      </ul>
+
+      <h4>Reference</h4>
+      <ul>
+        <li><a href="#shortcuts" data-kw="keyboard shortcuts tips efficiency undo redo copy paste">Shortcuts &amp; tips</a></li>
+        <li><a href="#setup" data-kw="fal.ai api key setup settings billing">fal.ai &amp; API keys</a></li>
+        <li><a href="#data" data-kw="data privacy appdata backup local files">Your data &amp; privacy</a></li>
+        <li><a href="#troubleshooting" data-kw="troubleshooting faq errors problems help">Troubleshooting &amp; FAQ</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <div class="content-inner">
+
+      <div class="hero">
+        <h1>The SpotOn Guide</h1>
+        <p class="lead">SpotOn is a node-based editor for generating and editing images — and turning images into 3D models — without writing code. This guide covers the interface, every tool, and the questions that come up most.</p>
+        <div class="pills">
+          <span class="pill">No coding required</span>
+          <span class="pill">Runs on your machine</span>
+          <span class="pill">Powered by fal.ai</span>
+        </div>
+      </div>
+
+      <section id="welcome">
+        <h2>Welcome</h2>
+        <p class="section-intro">A quick orientation before you dive in.</p>
+        <p>SpotOn works like a flowchart for images. You drop <strong>nodes</strong> onto a canvas — a prompt, an AI image generator, a crop, a preview — and wire them together by dragging from one node's output to another's input. Press <strong>Run</strong>, and SpotOn walks the graph from left to right, sending each step to the right place and streaming results back live.</p>
+        <p>It's built for repeatable work: build a pipeline once, then reuse it, tweak it, or hand a simplified version of it to a teammate through <a href="#tour-playground">Playground</a>. Everything you generate is automatically kept in your <a href="#tour-collection">Collection</a>, and everything you build lives entirely on your own machine — SpotOn itself stores nothing in the cloud.</p>
+        <div class="callout">
+          <strong>One thing worth knowing up front:</strong> SpotOn doesn't generate images itself. Every AI node sends its job to <a href="https://fal.ai" target="_blank" rel="noreferrer">fal.ai</a> and needs an API key plus an internet connection. Everything else — moving nodes, cropping, compositing, previewing — works fully offline. See <a href="#setup">fal.ai &amp; API keys</a>.
+        </div>
+      </section>
+
+      <section id="quick-start">
+        <h2>5-minute quick start</h2>
+        <p class="section-intro">The whole SpotOn loop, start to finish: type an idea, wire it up, and watch it render.</p>
+        <ol class="steps">
+          <li><strong>Open a workflow.</strong> Projects is the home screen. Click <strong>+ New Workflow</strong>, give it a name and a color, and hit Create.</li>
+          <li><strong>Look around.</strong> You land in the editor: the <strong>Nodes</strong> palette on the left, the canvas in the middle, the <strong>Inspector</strong> on the right, and the Run bar along the bottom.</li>
+          <li><strong>Add a Prompt.</strong> Drag <em>Prompt</em> from the Text category onto the canvas. Click it, then type a short description in the Inspector on the right — for example, "a minimalist ceramic mug on a sunlit wooden table, studio product photo."</li>
+          <li><strong>Add FAL AI.</strong> Drag a <em>FAL AI</em> node (AI Models category) next to it. Drag from the Prompt node's output dot to the FAL AI node's Prompt input dot to wire them together.</li>
+          <li><strong>Add a Preview.</strong> Drag a <em>Preview</em> node (I/O category), and connect FAL AI's Image output into it.</li>
+          <li><strong>Run it.</strong> Click <strong>RUN WORKFLOW</strong> at the bottom. SpotOn sends the job to fal.ai and the result streams straight into your Preview node.</li>
+        </ol>
+        <figure>
+          <img src="assets/spoton-guide/editor-run-complete.png" alt="A completed SpotOn run: Prompt, FAL AI, and Preview nodes wired together with a generated mug photo showing in the Preview node." />
+          <figcaption>The whole loop in one screen: Prompt → FAL AI → Preview, after a run.</figcaption>
+        </figure>
+        <p>That's it — that three-node chain is the backbone of almost everything you'll build in SpotOn. Everything else in this guide is really just more nodes bolted onto that same idea.</p>
+      </section>
+
+      <section id="interface-tour-heading" aria-hidden="true"></section>
+
+      <section id="tour-projects">
+        <h2>Interface tour: Projects</h2>
+        <p>Projects is where every workflow you build lives. Each card is one workflow — click it to open the editor, or use the small icons on a card to <strong>export</strong> it as a file, view its <strong>details</strong>, or <strong>delete</strong> it. Double-click a card's name to rename it right there.</p>
+        <p>Use <strong>+ New Workflow</strong> to start from scratch, or <strong>Import</strong> to load a <code>.blpw</code> workflow file someone shared with you.</p>
+        <figure>
+          <img src="assets/spoton-guide/projects-page.png" alt="The SpotOn Projects page showing a grid of workflow cards." />
+          <figcaption>Projects: your workflow library.</figcaption>
+        </figure>
+      </section>
+
+      <section id="tour-editor">
+        <h2>The workflow editor</h2>
+        <p>Open any workflow and you get three columns:</p>
+        <ul>
+          <li><strong>Nodes</strong> (left) — the palette of everything you can place, grouped into collapsible categories. Drag any item onto the canvas.</li>
+          <li><strong>Canvas</strong> (middle) — where you arrange and wire nodes. Scroll to pan, pinch or use the zoom controls in the bottom-left corner (<strong>+</strong>, <strong>−</strong>, Fit View).</li>
+          <li><strong>Inspector</strong> (right) — shows the fields for whichever node you've selected. Nothing selected? It just says so.</li>
+        </ul>
+        <p>Along the top: a back button, a description toggle for notes about the workflow, a <strong>Set template</strong> button (see <a href="#concept-templates">Templates &amp; pinning</a>), and a tab strip if you have more than one workflow open. Along the bottom: the big <strong>RUN WORKFLOW</strong> button, which turns into <strong>STOP</strong> while a run is in progress.</p>
+        <figure>
+          <img src="assets/spoton-guide/editor-overview.png" alt="The SpotOn workflow editor showing the Nodes palette, canvas with a starter Prompt to FAL AI to Preview chain, and an empty Inspector." />
+          <figcaption>A fresh workflow: palette, canvas, Inspector, and the Run bar.</figcaption>
+        </figure>
+      </section>
+
+      <section id="tour-inspector">
+        <h2>The Inspector</h2>
+        <p>Select any node and the Inspector shows, from top to bottom:</p>
+        <ul>
+          <li>Its <strong>Name</strong> — editable, purely a label for you.</li>
+          <li><strong>Bypass</strong> — a checkbox (shortcut <kbd>M</kbd>) that skips the node during a run and passes its input straight through.</li>
+          <li><strong>Pin to template</strong> — a checkbox (shortcut <kbd>P</kbd>) that exposes this node in Playground. See <a href="#concept-templates">Templates &amp; pinning</a>.</li>
+          <li><strong>Properties</strong> — whatever fields that specific node type needs: a prompt box, a model dropdown, width/height, a color swatch, and so on.</li>
+          <li><strong>Connections</strong> — a plain-language list of what's wired into and out of the node, handy for untangling a busy graph.</li>
+        </ul>
+        <figure>
+          <img src="assets/spoton-guide/inspector-prompt.png" alt="The Inspector panel showing a selected Prompt node with its Name, Bypass, Pin to template, Properties, and Connections sections." />
+          <figcaption>A Prompt node's Inspector — the same layout every node follows.</figcaption>
+        </figure>
+      </section>
+
+      <section id="tour-collection">
+        <h2>Collection</h2>
+        <p>Every image an AI node generates, and every model that comes out of <strong>Image to 3D</strong>, is saved here automatically — you never have to remember to keep anything. Items are grouped by date and can be sorted, filtered by type or orientation, switched between a comfortable or compact grid, and organized into your own folders.</p>
+        <p>Click any tile to open it full-size, where you can see the <strong>prompt, seed, and model</strong> that produced it, copy the image to your clipboard, download it, or delete it.</p>
+        <figure>
+          <img src="assets/spoton-guide/collection-page.png" alt="The SpotOn Collection page showing folders and a single generated image tile." />
+          <figcaption>Collection: everything you've generated, organized automatically.</figcaption>
+        </figure>
+      </section>
+
+      <section id="tour-playground">
+        <h2>Playground</h2>
+        <p>Playground is the fast lane: pick a fal.ai model, type a prompt, adjust size/steps/seed if you like, and click <strong>Generate</strong> — no canvas, no wiring. Everything you make here lands in Collection just like a workflow run does.</p>
+        <p>The <strong>Mode</strong> dropdown at the top also lists any workflow you've turned into a <a href="#concept-templates">template</a>. Switch to one and Playground becomes a simple form built from whatever nodes that workflow's author pinned.</p>
+        <figure>
+          <img src="assets/spoton-guide/playground-page.png" alt="The SpotOn Playground page with model, image size, inference steps, and seed settings, a prompt box, and generation history." />
+          <figcaption>Playground: generate without building a graph.</figcaption>
+        </figure>
+      </section>
+
+      <section id="tour-settings">
+        <h2>Settings</h2>
+        <p>This is where you paste and save your <strong>fal.ai API key</strong> — the one thing every AI node needs. Settings tells you plainly whether a key is saved, or whether it's being supplied by an environment variable instead, and shows the installed app version at the bottom.</p>
+        <figure>
+          <img src="assets/spoton-guide/settings-page.png" alt="The SpotOn Settings page showing the fal.ai API key section with a saved key confirmation." />
+          <figcaption>Settings: one field, your fal.ai key.</figcaption>
+        </figure>
+      </section>
+
+      <section id="core-concepts-heading" aria-hidden="true"></section>
+
+      <section id="concept-nodes">
+        <h2>Core concepts: Nodes &amp; connections</h2>
+        <p>Every node has small colored dots along its edges called <strong>ports</strong> — outputs on the right, inputs on the left. Each port carries one kind of value: <span class="tag">image</span> <span class="tag">text</span> <span class="tag">number</span> <span class="tag">color</span> <span class="tag">boolean</span> <span class="tag">3D model</span> — plus a flexible <span class="tag">any</span> type that fits everywhere. Drag from an output dot to a compatible input dot to connect them; SpotOn simply won't let you connect two ports whose types don't match, so there's nothing to get wrong here.</p>
+        <p>Only nodes that are actually wired into the graph do anything during a run — an unconnected node just sits there and is skipped (the one exception is a <strong>Note</strong>, which never runs at all, connected or not).</p>
+      </section>
+
+      <section id="concept-running">
+        <h2>Running &amp; stopping</h2>
+        <p><strong>RUN WORKFLOW</strong> sends your graph to the backend, which works through it node by node and streams each result back live — you'll see nodes complete in real time rather than waiting for the whole thing to finish silently. Click <strong>STOP</strong> at any point to cancel a run in progress.</p>
+      </section>
+
+      <section id="concept-bypass">
+        <h2>Bypass</h2>
+        <p>Select one or more nodes and press <kbd>M</kbd> to bypass them — SpotOn skips that step during the next run and simply passes its input straight through, so you can A/B a step without deleting it or rewiring anything. Press <kbd>Alt</kbd>+<kbd>M</kbd> to clear bypass again.</p>
+      </section>
+
+      <section id="concept-groups">
+        <h2>Groups</h2>
+        <p>Select a few nodes and press <kbd>Ctrl</kbd>+<kbd>G</kbd> to draw a labeled frame around them. Groups get their own small <strong>Play</strong> button in the corner of the frame, so you can run just that piece of a larger graph while you're testing it.</p>
+      </section>
+
+      <section id="concept-notes">
+        <h2>Notes</h2>
+        <p>The <strong>Note</strong> node is just free-form text on the canvas — a reminder to yourself, a label for a section of the graph, whatever you like. It has no ports, never runs, and is completely ignored by the engine.</p>
+      </section>
+
+      <section id="concept-templates">
+        <h2>Templates &amp; pinning</h2>
+        <p>Pinning turns a workflow into a simple form that anyone can use from Playground, without ever opening the node graph.</p>
+        <ul>
+          <li>Check <strong>Pin to template</strong> on an input node (press <kbd>P</kbd>) — a Prompt, Import Image, Number, Color Picker, or an AI node's own fields — and it becomes a field in the Playground form.</li>
+          <li>Pin a <strong>Preview</strong> or <strong>Export Image</strong> node and it becomes the result panel instead.</li>
+          <li><strong>Tools</strong> and <strong>Read Data</strong> nodes can't be pinned — they're internal plumbing, not something a template user should have to think about.</li>
+        </ul>
+        <p>Once at least one node is pinned, click <strong>Set template</strong> in the top bar of the editor and give it a name. It now shows up as its own mode in Playground's dropdown, right alongside the default Playground mode.</p>
+      </section>
+
+      <section id="concept-saving">
+        <h2>Saving &amp; autosave</h2>
+        <p>SpotOn saves your workflow automatically a few seconds after you stop editing, and immediately the moment you navigate away. There's no save button, and no risk in clicking around to explore.</p>
+      </section>
+
+      <section id="concept-files">
+        <h2>Import &amp; export files</h2>
+        <p>Any workflow can be exported to a <code>.blpw</code> file from its card on the Projects page, then imported again — on your own machine as a backup, or on someone else's to share the whole graph. This is a different thing entirely from the <strong>Export Image</strong> and <strong>Export 3D</strong> nodes, which write the images or models a workflow <em>produces</em>, not the workflow itself.</p>
+      </section>
+
+      <section id="recipes-heading" aria-hidden="true"></section>
+
+      <section id="recipe-first-image">
+        <h2>Recipe: Your first image</h2>
+        <p>This is the exact same three-node chain from the quick start, with a bit more context.</p>
+        <ol class="steps">
+          <li>Drag a <strong>Prompt</strong> node onto the canvas and describe what you want in plain language.</li>
+          <li>Drag a <strong>FAL AI</strong> node, connect the Prompt's output into its Prompt input, then pick a model in the Inspector.</li>
+          <li>Drag a <strong>Preview</strong> node and connect FAL AI's Image output into it.</li>
+          <li>Click <strong>RUN WORKFLOW</strong>.</li>
+        </ol>
+        <div class="callout tip">
+          <strong>Picking a model:</strong> "fast" models like FLUX.1 [schnell] render in seconds and are great for iterating on a prompt, but cap some settings lower (for example, fewer inference steps) than a slower, higher-quality model like FLUX.1 [dev] or FLUX1.1 [pro]. Try a fast model first, then switch to a stronger one once you like the prompt.
+        </div>
+      </section>
+
+      <section id="recipe-editing">
+        <h2>Recipe: Editing &amp; compositing</h2>
+        <p>Once you have an image — generated or imported — a handful of Tools nodes cover most editing needs:</p>
+        <ul>
+          <li><strong>Resize / Crop / Blur / Rotate &amp; Flip</strong> — the basics, each with a plain numeric or dropdown Inspector.</li>
+          <li><strong>Editor</strong> or <strong>Compositor</strong> — for layered composites. Add the node, then click <strong>Open editor</strong> in its Inspector to arrange layers visually; SpotOn bakes everything back into that node's single Image output when you close it.</li>
+          <li><strong>Remove Background</strong> — cuts a subject out with a cloud model. This one runs on fal.ai, so it needs a key and an internet connection, same as image generation.</li>
+          <li><strong>Key Color</strong> — chroma-keys a specific color out (green-screen style), with a manual mask you can paint in if the automatic result needs a touch-up.</li>
+        </ul>
+        <p>Chain as many of these as you like — each one takes an image in and puts an image out, so they connect in any order that makes sense for your edit.</p>
+      </section>
+
+      <section id="recipe-exporting">
+        <h2>Recipe: Exporting your work</h2>
+        <ol class="steps">
+          <li>Drag an <strong>Export Image</strong> node and connect up to 24 images into its input slots (use the <strong>+</strong> in the Inspector to add more slots).</li>
+          <li>Set a destination folder, and give each slot its own file name and format.</li>
+          <li>Click the <strong>Export</strong> button inside the node's Inspector.</li>
+        </ol>
+        <div class="callout warn">
+          <strong>Running the workflow alone does not export anything.</strong> RUN only fills the node's own preview so you can check it. Writing the files to disk is a separate, deliberate click on Export — that way a run never silently overwrites a folder.
+        </div>
+      </section>
+
+      <section id="recipe-template">
+        <h2>Recipe: Build a Playground template</h2>
+        <ol class="steps">
+          <li>Build a normal workflow — say, Prompt → FAL AI → Preview.</li>
+          <li>Select the <strong>Prompt</strong> node and check <strong>Pin to template</strong> (or press <kbd>P</kbd>). Do the same for any other input you want a teammate to control.</li>
+          <li>Select the <strong>Preview</strong> (or <strong>Export Image</strong>) node and pin it too — that becomes the result panel.</li>
+          <li>Click <strong>Set template</strong> at the top of the editor and give it a name.</li>
+        </ol>
+        <p>From then on, that name shows up in Playground's Mode dropdown. Anyone can pick it, fill in just the pinned fields, and get your exact pipeline — without ever seeing the node graph behind it.</p>
+      </section>
+
+      <section id="recipe-3d">
+        <h2>Recipe: Image to 3D</h2>
+        <ol class="steps">
+          <li>Start from any image — imported or generated.</li>
+          <li>Connect it into an <strong>Image to 3D</strong> node and pick a model: <strong>Tripo H3.1</strong> for a textured mesh, <strong>Hunyuan3D 2.1</strong> for PBR textures, or <strong>Hunyuan 3D 3.1 Rapid</strong> for a fast, untextured draft.</li>
+          <li>Connect its 3D Model output into a <strong>Preview 3D</strong> node to orbit it, adjust lighting, and check the mesh before exporting.</li>
+          <li>Connect that into an <strong>Export 3D</strong> node and export the finished GLB.</li>
+        </ol>
+        <div class="callout">
+          Preview 3D passes the mesh straight through, which is why it can sit in the middle of the chain between Image to 3D and Export 3D. Its optional Image output is a live snapshot of whatever the viewer is currently showing in your browser — it isn't rendered by the server, so it reflects the current camera angle, lighting, and display mode (textured, wireframe, or mesh) at the moment the workflow runs.
+        </div>
+      </section>
+
+      <section id="node-reference-heading" aria-hidden="true"></section>
+
+      <section id="nodes-general">
+        <h2>Node reference</h2>
+        <p class="section-intro">Every node currently in the palette, grouped exactly like the Nodes panel on the left of the editor.</p>
+
+        <h3 class="cat-heading"><span class="cat-dot" style="background:var(--cat-general)"></span>General</h3>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-general)"></span>Note <span class="node-teaser">— a sticky note for the canvas</span></summary>
+          <div class="node-meta"><span class="tag">no ports</span><span class="tag">never runs</span></div>
+          <div class="node-body"><p>Free-form text you drop anywhere on the canvas — a reminder, a label for a section of the graph, or context for a teammate. It has no inputs or outputs and is completely ignored when the workflow runs, connected or not.</p></div>
+        </details>
+      </section>
+
+      <section id="nodes-text">
+        <h3 class="cat-heading" style="margin-top:0"><span class="cat-dot" style="background:var(--cat-text)"></span>Text</h3>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-text)"></span>Prompt <span class="node-teaser">— your text box</span></summary>
+          <div class="node-meta"><span class="tag">out: text</span></div>
+          <div class="node-body"><p>The simplest text node: type into it, and its output is that exact text. Resizable on the canvas so you can see a long prompt without scrolling.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-text)"></span>Combine Prompts <span class="node-teaser">— merges two or more texts</span></summary>
+          <div class="node-meta"><span class="tag">in: 2+ text</span><span class="tag">out: text</span></div>
+          <div class="node-body"><p>Joins two or more incoming text values into one, separated by whatever you set as the separator (a newline by default). Use the <strong>+</strong> in the Inspector to add more input slots as you need them.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-text)"></span>RefMapper <span class="node-teaser">— labels what each reference image is for</span></summary>
+          <div class="node-meta"><span class="tag">out: text</span></div>
+          <div class="node-body"><p>Builds a structured instruction telling an AI model exactly what to take from each numbered reference image — for example, "take the pose from image 1" and "take the color palette from image 2." Useful whenever you're feeding several reference images into one generation and want to be explicit about each one's role, rather than leaving it to guesswork.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-text)"></span>Sketch2Final <span class="node-teaser">— turns a sketch note into prompt language</span></summary>
+          <div class="node-meta"><span class="tag">in: prompt (optional)</span><span class="tag">out: text</span></div>
+          <div class="node-body"><p>Adds phrasing that describes a sketch's level of finish (rough or detailed) and whether it's colored, then combines that with any prompt text wired into it — handy for sketch-to-final-image pipelines where you want the model to understand it's starting from a rough drawing.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-text)"></span>Studio <span class="node-teaser">— quick photography-language phrases</span></summary>
+          <div class="node-meta"><span class="tag">out: text</span></div>
+          <div class="node-body"><p>Three independent toggles that each add a short phrase to the output: a <strong>lens</strong> (wide-angle, standard, telephoto, macro), a <strong>shot</strong> (wide, medium, close-up, extreme close-up, long, arrival), and a <strong>view</strong> (eye level, low/high angle, bird's eye, or one of six orthographic views for product/3D-style shots). Turn any of the three off if you don't need it.</p></div>
+        </details>
+      </section>
+
+      <section id="nodes-io">
+        <h3 class="cat-heading" style="margin-top:0"><span class="cat-dot" style="background:var(--cat-io)"></span>I/O</h3>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-io)"></span>Import Image <span class="node-teaser">— brings a picture in</span></summary>
+          <div class="node-meta"><span class="tag">out: image</span></div>
+          <div class="node-body"><p>Pick a file from disk, or simply drag an image file onto the canvas anywhere — SpotOn creates one of these automatically.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-io)"></span>Export Image <span class="node-teaser">— writes finished images to disk</span></summary>
+          <div class="node-meta"><span class="tag">in: up to 24 images</span></div>
+          <div class="node-body"><p>Set a destination folder and a file name/format per slot, then click <strong>Export</strong> in the Inspector. Running the workflow alone doesn't write files — see <a href="#recipe-exporting">Exporting your work</a>.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-io)"></span>Preview <span class="node-teaser">— shows an image inline</span></summary>
+          <div class="node-meta"><span class="tag">in: image</span></div>
+          <div class="node-body"><p>Displays whatever image is wired into it, right on the canvas. Resizable, and this is also the node type you'd pin as a template's result panel.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-io)"></span>Preview 3D <span class="node-teaser">— an orbitable 3D viewer</span></summary>
+          <div class="node-meta"><span class="tag">in: 3D model</span><span class="tag">out: 3D model, image</span></div>
+          <div class="node-body"><p>Orbit a mesh with a grid floor, adjustable key/fill light and shadow strength, and three display modes: Textured, Wireframe, or Mesh only. It passes the model straight through so it can sit between Image to 3D and Export 3D, and its Image output is a snapshot of whatever's currently on screen in your browser (not computed by the server).</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-io)"></span>Export 3D <span class="node-teaser">— writes a mesh to disk</span></summary>
+          <div class="node-meta"><span class="tag">in: 3D model</span></div>
+          <div class="node-body"><p>Saves the connected mesh as a GLB file to a folder and file name you choose.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-io)"></span>Import 3D <span class="node-teaser">— brings a mesh in</span></summary>
+          <div class="node-meta"><span class="tag">out: 3D model</span></div>
+          <div class="node-body"><p>Import a GLB, OBJ, or FBX file. Whatever format you bring in is converted to GLB automatically so the rest of the app only ever has to deal with one format.</p></div>
+        </details>
+      </section>
+
+      <section id="nodes-tools">
+        <h3 class="cat-heading" style="margin-top:0"><span class="cat-dot" style="background:var(--cat-tool)"></span>Tools</h3>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Resize <span class="node-teaser">— change dimensions</span></summary>
+          <div class="node-meta"><span class="tag">in: image, width, height</span><span class="tag">out: image</span></div>
+          <div class="node-body"><p>Set a target width/height, optionally lock the aspect ratio, and choose whether it stretches to fit exactly or fits within the box while keeping proportions (with an anchor point for where it settles).</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Crop <span class="node-teaser">— cut out a region</span></summary>
+          <div class="node-meta"><span class="tag">in: image, x, y, width, height</span><span class="tag">out: image</span></div>
+          <div class="node-body"><p>Type exact X/Y/width/height numbers, or click <strong>Open Crop</strong> in the Inspector to drag a crop box directly over the image instead.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Blur <span class="node-teaser">— soften the image</span></summary>
+          <div class="node-meta"><span class="tag">in: image, radius</span><span class="tag">out: image</span></div>
+          <div class="node-body"><p>A simple blur with a single radius setting — larger numbers blur more.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Rotate / Flip <span class="node-teaser">— reorient the image</span></summary>
+          <div class="node-meta"><span class="tag">in: image, angle</span><span class="tag">out: image</span></div>
+          <div class="node-body"><p>Rotate by any angle, and independently flip horizontally and/or vertically.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Set Mask <span class="node-teaser">— apply a mask onto an image</span></summary>
+          <div class="node-meta"><span class="tag">in: image, mask</span><span class="tag">out: image</span></div>
+          <div class="node-body"><p>Uses a second connected image as an alpha mask on the first, with an option to invert it.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Key Color <span class="node-teaser">— chroma-key a color out</span></summary>
+          <div class="node-meta"><span class="tag">in: image</span><span class="tag">out: image (RGBA)</span></div>
+          <div class="node-body"><p>Pick a key color and adjust threshold/softness to knock it out (classic green-screen technique), with a manual mask you can paint over the automatic result to clean up edges.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Remove Background <span class="node-teaser">— cloud-powered subject cutout</span></summary>
+          <div class="node-meta"><span class="tag">in: image</span><span class="tag">out: image (RGBA)</span><span class="tag">needs fal.ai key</span></div>
+          <div class="node-body"><p>Runs a background-removal model on fal.ai — this is the one Tools node that needs an internet connection and an API key, same as image generation. Options include model/operating resolution, foreground refinement, edge feather/erode/dilate, inversion, and filling the background with a solid color instead of leaving it transparent.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Simple Combine <span class="node-teaser">— overlay one image on another</span></summary>
+          <div class="node-meta"><span class="tag">in: overlay image, base image</span><span class="tag">out: image</span></div>
+          <div class="node-body"><p>Lays one image over another with an adjustable opacity — the fastest way to composite two images without opening a full layer editor.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Stack Images <span class="node-teaser">— line images up side by side</span></summary>
+          <div class="node-meta"><span class="tag">in: up to 12 images</span><span class="tag">out: image</span></div>
+          <div class="node-body"><p>Arranges up to 12 images horizontally or vertically into one strip, with an option to stretch them so they all match in size.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Divider <span class="node-teaser">— split one image into pieces</span></summary>
+          <div class="node-meta"><span class="tag">in: image</span><span class="tag">out: up to 16 images</span></div>
+          <div class="node-body"><p>Cuts one image into up to 16 separate output slices, positioned visually in its own editor — the mirror image of Stack Images.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Editor <span class="node-teaser">— freeform layer compositor</span></summary>
+          <div class="node-meta"><span class="tag">in: background layer</span><span class="tag">out: image</span></div>
+          <div class="node-body"><p>Click <strong>Open editor</strong> to arrange a background plus any number of image layers visually, then close it to bake everything into this node's single Image output.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Compositor <span class="node-teaser">— fixed-canvas multi-layer composite</span></summary>
+          <div class="node-meta"><span class="tag">in: background</span><span class="tag">out: image</span><span class="tag">up to 24 layers</span></div>
+          <div class="node-body"><p>Similar to Editor, but built around a fixed canvas size you set up front — good for compositing onto a known output size, like a poster or a specific product-shot canvas.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-tool)"></span>Vignette <span class="node-teaser">— shaped edge darkening or lightening</span></summary>
+          <div class="node-meta"><span class="tag">in: image</span><span class="tag">out: image</span><span class="tag">up to 4 layers</span></div>
+          <div class="node-body"><p>Stack up to four vignette layers, each with its own shape, color, opacity, blend mode, size, and feather — for anything from a subtle photographic vignette to a full stylized frame.</p></div>
+        </details>
+      </section>
+
+      <section id="nodes-values">
+        <h3 class="cat-heading" style="margin-top:0"><span class="cat-dot" style="background:var(--cat-value)"></span>Values</h3>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-value)"></span>Number <span class="node-teaser">— a constant number</span></summary>
+          <div class="node-meta"><span class="tag">out: number</span></div>
+          <div class="node-body"><p>A plain numeric value you can wire into anything that accepts a number — width, height, blur radius, and so on — instead of typing it directly into each field.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-value)"></span>Color Picker <span class="node-teaser">— a constant color</span></summary>
+          <div class="node-meta"><span class="tag">out: color</span></div>
+          <div class="node-body"><p>Pick a color once and reuse it anywhere a color input is accepted, such as a Key Color node's target color.</p></div>
+        </details>
+      </section>
+
+      <section id="nodes-read">
+        <h3 class="cat-heading" style="margin-top:0"><span class="cat-dot" style="background:var(--cat-read)"></span>Read Data</h3>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-read)"></span>Get Channel <span class="node-teaser">— splits color channels</span></summary>
+          <div class="node-meta"><span class="tag">in: image</span><span class="tag">out: alpha, red, green, blue</span></div>
+          <div class="node-body"><p>Breaks an image into its individual Alpha, Red, Green, and Blue channels, each available as its own image output — useful for masking work or channel-based effects.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-read)"></span>Get Image Size <span class="node-teaser">— reads width and height</span></summary>
+          <div class="node-meta"><span class="tag">in: image</span><span class="tag">out: width, height</span></div>
+          <div class="node-body"><p>Reads an image's dimensions as two Number outputs, so you can feed a source image's size into a Resize node elsewhere in the graph instead of typing it in by hand.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-read)"></span>Get Color Palette <span class="node-teaser">— extracts dominant colors</span></summary>
+          <div class="node-meta"><span class="tag">in: image</span><span class="tag">out: swatch image, colors text</span></div>
+          <div class="node-body"><p>Pulls a small palette (5 colors by default) out of an image, giving you both a visual swatch strip and a plain-text list of the colors — handy for matching a brand palette or feeding colors into a prompt.</p></div>
+        </details>
+      </section>
+
+      <section id="nodes-ai">
+        <h3 class="cat-heading" style="margin-top:0"><span class="cat-dot" style="background:var(--cat-ai)"></span>AI Models</h3>
+        <p class="section-intro">Every node in this category calls out to fal.ai and needs an API key — see <a href="#setup">fal.ai &amp; API keys</a>.</p>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-ai)"></span>Image SCF Prompt <span class="node-teaser">— turns an image into a prompt</span></summary>
+          <div class="node-meta"><span class="tag">in: image</span><span class="tag">out: text</span></div>
+          <div class="node-body"><p>Looks at an image and writes a description you can feed into another AI node. Toggle any combination of <strong>Style</strong>, <strong>Content</strong>, and <strong>Feel</strong> to control what it focuses on — great for turning a reference image into words when a model doesn't take images directly.</p></div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-ai)"></span>FAL AI <span class="node-teaser">— the main image generator</span></summary>
+          <div class="node-meta"><span class="tag">in: prompt and/or reference image(s), model-dependent</span><span class="tag">out: image</span></div>
+          <div class="node-body">
+            <p>One node, sixteen models — pick from the dropdown and the node's inputs adjust to match what that model needs. Some take a text prompt only, some take one or more reference images (with or without a prompt), and sizing is controlled either by an image-size preset or an aspect ratio depending on the model.</p>
+            <table>
+              <thead><tr><th>Model family</th><th>Reference images</th><th>Sizing</th></tr></thead>
+              <tbody>
+                <tr><td>FLUX.1 [dev] / [schnell] / 1.1 [pro] / FLUX.2 [pro]</td><td>None, or multiple (FLUX.2 [pro])</td><td>Image size preset</td></tr>
+                <tr><td>FLUX.1 [dev] Redux</td><td>Required, single (no prompt — pure variation)</td><td>Image size preset</td></tr>
+                <tr><td>Stable Diffusion 3.5 Large</td><td>None</td><td>Image size preset</td></tr>
+                <tr><td>Fast SDXL</td><td>Optional, single</td><td>Image size preset</td></tr>
+                <tr><td>Nano Banana / Edit / Pro / 2</td><td>None to multiple, depending on variant</td><td>Aspect ratio</td></tr>
+                <tr><td>GPT Image 2</td><td>Multiple</td><td>Image size preset (with Auto)</td></tr>
+                <tr><td>Seedream 5 Pro</td><td>Multiple</td><td>Image size preset (with Auto 1K/2K)</td></tr>
+                <tr><td>Ideogram 4</td><td>Single</td><td>Image size preset</td></tr>
+                <tr><td>Recraft V4.1</td><td>None</td><td>Image size preset</td></tr>
+                <tr><td>Z-Image Turbo</td><td>Single</td><td>Image size preset</td></tr>
+              </tbody>
+            </table>
+            <p>As a rule of thumb: "fast" or "turbo" variants render quicker and cheaper but cap some settings lower; "pro" variants cost more and generally give you finer control and quality.</p>
+          </div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-ai)"></span>Image to 3D <span class="node-teaser">— turns an image into a mesh</span></summary>
+          <div class="node-meta"><span class="tag">in: image</span><span class="tag">out: 3D model</span></div>
+          <div class="node-body">
+            <p>Converts a single image into a 3D mesh. Three models to choose from:</p>
+            <ul>
+              <li><strong>Tripo H3.1</strong> — textured, with a Standard or Detailed texture quality option.</li>
+              <li><strong>Hunyuan3D 2.1</strong> — PBR (physically based) textures.</li>
+              <li><strong>Hunyuan 3D 3.1 Rapid</strong> — fast, but the result has no textures. It's a good choice for quickly checking a shape before committing to a slower, textured pass.</li>
+            </ul>
+          </div>
+        </details>
+        <details class="node-card">
+          <summary><span class="cat-bar" style="background:var(--cat-ai)"></span>Upscaler <span class="node-teaser">— makes an image bigger, with more detail</span></summary>
+          <div class="node-meta"><span class="tag">in: image, prompt (Clarity only)</span><span class="tag">out: image</span></div>
+          <div class="node-body">
+            <p>Connect an image, pick a model and a scale (2x or 4x). Two models to choose from:</p>
+            <ul>
+              <li><strong>Real-ESRGAN</strong> — fast and cheap, no prompt. Good default for photos and general upscaling.</li>
+              <li><strong>Clarity Upscaler</strong> — slower and pricier, with an optional prompt to steer the added detail. Better for pushing a soft or low-resolution image toward a sharper, more "generated" look.</li>
+            </ul>
+            <p>This is different from the <strong>Resize</strong> tool: Resize stretches or crops pixels locally and is free; Upscaler runs an AI model on fal.ai to add real detail, and costs money per run.</p>
+          </div>
+        </details>
+
+        <div class="callout warn">
+          <strong>Legacy nodes:</strong> older workflows may still contain direct model nodes like <em>Nano Banana Pro</em>, <em>Nano Banana 2</em>, or <em>GPT Image 2</em>. These were replaced by the single FAL AI node and are kept only so old graphs still open correctly — they'll show up on the canvas, but running one now fails with a message telling you to replace it. Swap it for a FAL AI node and pick the equivalent model from its dropdown.
+        </div>
+      </section>
+
+      <section id="shortcuts">
+        <h2>Shortcuts &amp; tips</h2>
+        <table>
+          <thead><tr><th>Shortcut</th><th>What it does</th></tr></thead>
+          <tbody>
+            <tr><td><kbd>M</kbd></td><td>Bypass the selected node(s)</td></tr>
+            <tr><td><kbd>Alt</kbd>+<kbd>M</kbd></td><td>Clear bypass on the selected node(s)</td></tr>
+            <tr><td><kbd>P</kbd></td><td>Pin/unpin the selected node(s) to the template</td></tr>
+            <tr><td><kbd>Alt</kbd>+<kbd>P</kbd></td><td>Unpin the selected node(s)</td></tr>
+            <tr><td><kbd>Delete</kbd> / <kbd>Backspace</kbd></td><td>Delete the selected node(s)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Undo</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Redo</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>A</kbd></td><td>Select every node on the canvas</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>C</kbd></td><td>Copy the selected node(s)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>V</kbd></td><td>Paste — pastes copied nodes, or an image from your system clipboard as a new Import Image node</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>G</kbd></td><td>Group the selected nodes</td></tr>
+            <tr><td><kbd>Ctrl</kbd> + drag on empty canvas</td><td>Scissor-cut any connection lines the drag crosses</td></tr>
+            <tr><td><kbd>Alt</kbd> + drag a node</td><td>Duplicate it in place, leaving the original behind</td></tr>
+            <tr><td>Drag an image file onto the canvas</td><td>Creates an Import Image node automatically</td></tr>
+          </tbody>
+        </table>
+        <p>A few extra habits worth building:</p>
+        <ul>
+          <li>Use <strong>Bypass</strong> instead of deleting a node when you're comparing two versions of a step — it's one keypress to toggle back.</li>
+          <li><strong>Group</strong> a section of a large graph so you can re-run just that piece while you're tuning it, instead of the whole workflow every time.</li>
+          <li>When a fal.ai call fails with a message about a parameter being out of range (like inference steps), it usually means the model you picked caps that setting lower than the one you were using before — just lower the value and try again.</li>
+        </ul>
+      </section>
+
+      <section id="setup">
+        <h2>fal.ai &amp; API keys</h2>
+        <p>Every AI node — FAL AI, Image SCF Prompt, Image to 3D, Upscaler, and the Remove Background tool — runs on <a href="https://fal.ai" target="_blank" rel="noreferrer">fal.ai</a>, not on your computer. Each one needs internet access and an API key to work.</p>
+        <ol class="steps">
+          <li>Ask whoever manages your studio's fal.ai account for your personal key, from their <a href="https://fal.ai/dashboard/keys" target="_blank" rel="noreferrer">Dashboard → Keys</a>. It's shown to them only once, at creation.</li>
+          <li>Open <strong>Settings</strong> and paste it into the field, then click <strong>Save key</strong>.</li>
+        </ol>
+        <p>The key is stored on the backend (never in the browser) and is only ever sent to fal.ai. If more than one key source is present, SpotOn checks them in this order: a key typed directly into a node's Inspector, then the key saved in Settings, then a <code>FAL_KEY</code> environment variable as a last-resort fallback.</p>
+        <div class="callout warn">
+          Costs land on the shared studio account, billed per call — and that includes Remove Background and Image SCF Prompt, not just image generation. Treat your key like a password, and ask the account owner to revoke and reissue it if you think it's leaked.
+        </div>
+      </section>
+
+      <section id="data">
+        <h2>Your data &amp; privacy</h2>
+        <p>SpotOn runs entirely on your own machine (or your studio's own server) — the app itself doesn't store anything anywhere else. Everything it writes lives in one folder: <code>%APPDATA%\SpotOn</code>.</p>
+        <table>
+          <thead><tr><th>Path</th><th>Contents</th></tr></thead>
+          <tbody>
+            <tr><td><code>spoton.db</code></td><td>Your workflows, Collection metadata, and saved API keys</td></tr>
+            <tr><td><code>collection/</code></td><td>Every image SpotOn has generated</td></tr>
+            <tr><td><code>uploads/</code></td><td>Images you've imported</td></tr>
+            <tr><td><code>models/</code></td><td>Generated 3D meshes</td></tr>
+            <tr><td><code>exports/</code></td><td>Where Export nodes write by default</td></tr>
+          </tbody>
+        </table>
+        <p>Back up that one folder and you've backed up everything — every workflow, every generated image, and your saved key. Nothing leaves your machine except what an AI node explicitly sends to fal.ai to do its job: the prompt text and any reference image you've wired into it.</p>
+      </section>
+
+      <section id="troubleshooting">
+        <h2>Troubleshooting &amp; FAQ</h2>
+
+        <details class="faq">
+          <summary>My Export Image node didn't create any files — why?</summary>
+          <div class="faq-a">Export needs an explicit click on the <strong>Export</strong> button inside its Inspector. Running the workflow only fills that node's own preview so you can check the result first — it never writes to disk by itself.</div>
+        </details>
+
+        <details class="faq">
+          <summary>An AI node fails with an authentication or quota error.</summary>
+          <div class="faq-a">That error comes from fal.ai, not SpotOn. Check the key on the Settings page first; if it looks right, ask whoever manages your studio's fal.ai account whether the key was revoked or the shared account ran out of credit.</div>
+        </details>
+
+        <details class="faq">
+          <summary>An old workflow has a node like "Nano Banana Pro" that won't run.</summary>
+          <div class="faq-a">That's a legacy node type, kept registered only so older saved workflows still open and display correctly. It can no longer run — replace it with a <strong>FAL AI</strong> node and choose the equivalent model from its dropdown.</div>
+        </details>
+
+        <details class="faq">
+          <summary>A generation failed with an error about a setting like "inference steps."</summary>
+          <div class="faq-a">Some fast models cap certain settings lower than others — for example, FLUX.1 [schnell] only accepts up to 12 inference steps, versus 50 on the standard models. If a call fails with a message like "should be less than or equal to 12," just lower that field and run it again.
+          <figure style="margin-top:12px;">
+            <img src="assets/spoton-guide/playground-error-example.png" alt="A real Playground error message showing an inference steps value that exceeded the selected model's limit." />
+            <figcaption>A real example: FLUX.1 [schnell] rejecting 28 inference steps because its limit is 12.</figcaption>
+          </figure>
+          </div>
+        </details>
+
+        <details class="faq">
+          <summary>Why does SpotOn need an internet connection at all?</summary>
+          <div class="faq-a">Only the AI nodes do — image generation, background removal, image-to-prompt, image-to-3D, and upscaling all run on fal.ai's servers. Everything else (arranging nodes, cropping, compositing, previewing, exporting) works completely offline.</div>
+        </details>
+
+        <details class="faq">
+          <summary>The console window closed, or I see "Cannot reach the SpotOn server."</summary>
+          <div class="faq-a">On an installed copy, that console window <em>is</em> the app — closing it shuts SpotOn down. Reopen SpotOn from the Start Menu; launching it again while it's already running just opens another browser tab on the same copy instead of starting a second one.</div>
+        </details>
+
+        <details class="faq">
+          <summary>Port 8000 is already being used by something else.</summary>
+          <div class="faq-a">SpotOn automatically tries the next free port and prints which one it settled on. Set the <code>SPOTON_PORT</code> environment variable if you want to choose a specific one yourself.</div>
+        </details>
+
+        <details class="faq">
+          <summary>Does uninstalling delete my workflows and images?</summary>
+          <div class="faq-a">No. Uninstalling removes only the program itself — everything in <code>%APPDATA%\SpotOn</code> is deliberately left alone, so a reinstall or an upgrade never loses your work. Delete that folder yourself if you genuinely want it gone.</div>
+        </details>
+
+        <details class="faq">
+          <summary>Can more than one person use SpotOn at once?</summary>
+          <div class="faq-a">SpotOn is built as a local, single-user app — one person, one machine, one local database. It's not designed for multiple people to share a single running copy at the same time.</div>
+        </details>
+      </section>
+
+      <footer class="site-footer">
+        <p>SpotOn Guide — built from the app's own source and documentation. If something here ever looks out of date compared to the app in front of you, trust the app.</p>
+      </footer>
+
+    </div>
+  </main>
+</div>
+
+<button id="back-to-top" aria-label="Back to top">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+</button>
+
+<script>
+(function () {
+  var body = document.body;
+  var navToggle = document.getElementById('navToggle');
+  var tocAside = document.getElementById('tocAside');
+  var tocBackdrop = document.getElementById('tocBackdrop');
+  var tocSearch = document.getElementById('tocSearch');
+  var tocNav = document.getElementById('tocNav');
+  var backToTop = document.getElementById('back-to-top');
+
+  function closeNav() {
+    body.classList.remove('nav-open');
+    navToggle.setAttribute('aria-expanded', 'false');
+  }
+  function toggleNav() {
+    var open = body.classList.toggle('nav-open');
+    navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  navToggle.addEventListener('click', toggleNav);
+  tocBackdrop.addEventListener('click', closeNav);
+  tocNav.addEventListener('click', function (e) {
+    if (e.target.tagName === 'A') closeNav();
+  });
+
+  /* Search filters the nav links by visible text + data-kw */
+  tocSearch.addEventListener('input', function () {
+    var q = tocSearch.value.trim().toLowerCase();
+    var items = tocNav.querySelectorAll('li');
+    var groups = tocNav.querySelectorAll('h4');
+    items.forEach(function (li) {
+      var a = li.querySelector('a');
+      var haystack = (a.textContent + ' ' + (a.getAttribute('data-kw') || '')).toLowerCase();
+      var match = q === '' || haystack.indexOf(q) !== -1;
+      li.classList.toggle('no-match', !match);
+    });
+    groups.forEach(function (h4) {
+      var ul = h4.nextElementSibling;
+      if (!ul) return;
+      var anyVisible = Array.prototype.some.call(ul.querySelectorAll('li'), function (li) {
+        return !li.classList.contains('no-match');
+      });
+      h4.classList.toggle('no-match', !anyVisible);
+    });
+  });
+
+  /* Back to top button */
+  window.addEventListener('scroll', function () {
+    backToTop.classList.toggle('visible', window.scrollY > 480);
+  });
+  backToTop.addEventListener('click', function () {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+
+  /* Active-section highlighting */
+  var navLinks = Array.prototype.slice.call(tocNav.querySelectorAll('a[href^="#"]'));
+  var linkByTarget = {};
+  navLinks.forEach(function (a) { linkByTarget[a.getAttribute('href').slice(1)] = a; });
+
+  var headings = Array.prototype.slice.call(document.querySelectorAll('main section[id] > h2, main section[id]'))
+    .filter(function (el) { return linkByTarget[el.id]; });
+
+  if ('IntersectionObserver' in window) {
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          navLinks.forEach(function (a) { a.classList.remove('active'); });
+          var link = linkByTarget[entry.target.id];
+          if (link) link.classList.add('active');
+        }
+      });
+    }, { rootMargin: '-15% 0px -70% 0px', threshold: 0 });
+    headings.forEach(function (h) { observer.observe(h); });
+  }
+
+  /* Print: open every collapsible section so nothing is missing on paper */
+  var openState = [];
+  window.addEventListener('beforeprint', function () {
+    openState = [];
+    document.querySelectorAll('details').forEach(function (d) {
+      openState.push([d, d.open]);
+      d.open = true;
+    });
+  });
+  window.addEventListener('afterprint', function () {
+    openState.forEach(function (pair) { pair[0].open = pair[1]; });
+  });
+})();
+</script>
+</body>
+</html>

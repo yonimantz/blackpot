@@ -16,9 +16,12 @@ import {
   invalidateCollectionImageCache,
 } from '../utils/collectionImageCache';
 import { copyImageToClipboard, downloadBlob } from '../utils/imageObjectUrl';
+import { GenerationMetaInfo } from '../components/GenerationMetaInfo';
+import Icon from '../icons/Icon';
 
 type SortKey = 'newest' | 'oldest' | 'largest' | 'smallest';
 type OrientationFilter = 'all' | 'landscape' | 'portrait' | 'square';
+type KindFilter = 'all' | 'image' | 'model3d';
 type Density = 'comfortable' | 'compact';
 
 type DateSectionKey = 'today' | 'yesterday' | 'week' | 'earlier';
@@ -29,31 +32,6 @@ const DATE_SECTION_LABELS: Record<DateSectionKey, string> = {
   week: 'This week',
   earlier: 'Earlier',
 };
-
-function ShelfIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.75"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M4 19V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v14" />
-      <path d="M4 10h16" />
-      <path d="M4 15h16" />
-      <path d="M9 6v4" />
-      <path d="M15 6v4" />
-      <path d="M9 11v4" />
-      <path d="M15 11v4" />
-    </svg>
-  );
-}
 
 function CollectionImage({
   imageId,
@@ -90,6 +68,27 @@ function CollectionImage({
   return <img src={src} alt={alt} className={className} loading="lazy" />;
 }
 
+function isModel3d(item: CollectionItem): boolean {
+  return item.kind === 'model3d';
+}
+
+/** Tile stand-in for a mesh whose generator returned no render. */
+function Model3dTilePlaceholder({ className }: { className?: string }) {
+  return (
+    <div className={className ? `${className} collection-thumb-3d` : 'collection-thumb-3d'}>
+      <Icon name="vector-group-line" size={40} />
+      <span>3D model</span>
+    </div>
+  );
+}
+
+function CollectionThumb({ item, className }: { item: CollectionItem; className?: string }) {
+  if (isModel3d(item) && item.has_thumb === false) {
+    return <Model3dTilePlaceholder className={className} />;
+  }
+  return <CollectionImage imageId={item.id} className={className} />;
+}
+
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString(undefined, {
     month: 'short',
@@ -116,6 +115,11 @@ function matchesOrientation(item: CollectionItem, filter: OrientationFilter): bo
   const o = itemOrientation(item);
   if (o === 'unknown') return true;
   return o === filter;
+}
+
+function matchesKind(item: CollectionItem, filter: KindFilter): boolean {
+  if (filter === 'all') return true;
+  return (item.kind ?? 'image') === filter;
 }
 
 function sortItems(list: CollectionItem[], sortKey: SortKey): CollectionItem[] {
@@ -177,22 +181,18 @@ function EmptyCollectionState({ inFolder }: { inFolder: boolean }) {
   return (
     <div className="collection-empty">
       <div className="collection-empty-icon" aria-hidden>
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.25">
-          <rect x="3" y="3" width="18" height="18" rx="2" />
-          <circle cx="8.5" cy="8.5" r="1.5" fill="currentColor" stroke="none" />
-          <path d="M21 15l-5-5L5 21" />
-        </svg>
+        <Icon name="pic-2-line" size={48} />
       </div>
       {inFolder ? (
         <>
           <p className="collection-empty-title">This folder is empty</p>
-          <p className="collection-empty-hint">Move images here from Unfiled or other folders.</p>
+          <p className="collection-empty-hint">Move items here from Unfiled or other folders.</p>
         </>
       ) : (
         <>
-          <p className="collection-empty-title">No unfiled images</p>
+          <p className="collection-empty-title">No unfiled items</p>
           <p className="collection-empty-hint">
-            Generated images land here until you organize them into folders.
+            Generated images and 3D models land here until you organize them into folders.
           </p>
         </>
       )}
@@ -208,6 +208,7 @@ export default function CollectionPage() {
   const [unfiledCount, setUnfiledCount] = useState<number | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('newest');
   const [orientationFilter, setOrientationFilter] = useState<OrientationFilter>('all');
+  const [kindFilter, setKindFilter] = useState<KindFilter>('all');
   const [density, setDensity] = useState<Density>('comfortable');
   const [lightbox, setLightbox] = useState<CollectionItem | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<CollectionItem | null>(null);
@@ -249,9 +250,11 @@ export default function CollectionPage() {
   }, [activeFolderId]);
 
   const displayItems = useMemo(() => {
-    const filtered = items.filter((i) => matchesOrientation(i, orientationFilter));
+    const filtered = items.filter(
+      (i) => matchesKind(i, kindFilter) && matchesOrientation(i, orientationFilter),
+    );
     return sortItems(filtered, sortKey);
-  }, [items, orientationFilter, sortKey]);
+  }, [items, kindFilter, orientationFilter, sortKey]);
 
   const groupedSections = useMemo(() => groupByDateSection(displayItems), [displayItems]);
 
@@ -360,7 +363,7 @@ export default function CollectionPage() {
       const blob = await fetchCollectionImageBlob(item.id);
       downloadBlob(blob, item.filename);
     } catch {
-      alert('Failed to download image');
+      alert(isModel3d(item) ? 'Failed to download 3D model' : 'Failed to download image');
     }
   }, []);
 
@@ -386,7 +389,7 @@ export default function CollectionPage() {
       if (lightbox?.id === deleteTarget.id) setLightbox(null);
       loadFolders();
     } catch {
-      alert('Failed to delete image');
+      alert('Failed to delete item');
     }
     setDeleteTarget(null);
   }, [deleteTarget, lightbox, loadFolders]);
@@ -407,7 +410,7 @@ export default function CollectionPage() {
       await loadFolders();
       await loadItems();
     } catch {
-      alert('Failed to delete some images');
+      alert('Failed to delete some items');
     }
   }, [selectedIds, lightbox, loadFolders, loadItems]);
 
@@ -446,7 +449,7 @@ export default function CollectionPage() {
         await loadItems();
         await loadFolders();
       } catch {
-        alert('Failed to move images');
+        alert('Failed to move items');
       }
     },
     [selectedIds, loadItems, loadFolders],
@@ -504,9 +507,7 @@ export default function CollectionPage() {
         <h1 className="collection-title">Collection</h1>
         <span className="collection-count">
           {loading ? '…' : `${displayItems.length} shown`}
-          {!loading && orientationFilter !== 'all' && items.length !== displayItems.length
-            ? ` of ${items.length}`
-            : ''}
+          {!loading && items.length !== displayItems.length ? ` of ${items.length}` : ''}
           {activeFolder ? ` — ${activeFolder.name}` : ' — Unfiled'}
         </span>
         <div className="collection-header-actions">
@@ -550,7 +551,7 @@ export default function CollectionPage() {
                         className="collection-move-menu-item"
                         onClick={() => runMove(f.id)}
                       >
-                        <ShelfIcon className="collection-move-menu-icon" />
+                        <Icon name="folder-line" size={14} className="collection-move-menu-icon" />
                         {f.name}
                       </button>
                     ))}
@@ -584,6 +585,18 @@ export default function CollectionPage() {
             <option value="oldest">Oldest</option>
             <option value="largest">Largest</option>
             <option value="smallest">Smallest</option>
+          </select>
+        </label>
+        <label className="collection-toolbar-field">
+          <span className="collection-toolbar-label">Type</span>
+          <select
+            className="collection-toolbar-select"
+            value={kindFilter}
+            onChange={(e) => setKindFilter(e.target.value as KindFilter)}
+          >
+            <option value="all">All</option>
+            <option value="image">Images</option>
+            <option value="model3d">3D models</option>
           </select>
         </label>
         <label className="collection-toolbar-field">
@@ -621,7 +634,7 @@ export default function CollectionPage() {
         <button
           type="button"
           className={`collection-folder-chip ${activeFolderId === null ? 'active' : ''} ${dropTargetFolderId === 'unfiled' ? 'drop-target' : ''}`}
-          title="Images not in any folder"
+          title="Items not in any folder"
           onClick={() => {
             setActiveFolderId(null);
             setFolderMenuOpenId(null);
@@ -642,7 +655,7 @@ export default function CollectionPage() {
               }}
               {...folderDropHandlers(f.id, f.id)}
             >
-              <ShelfIcon className="collection-folder-chip-icon" />
+              <Icon name="folder-line" size={14} className="collection-folder-chip-icon" />
               <span className="collection-folder-chip-label">{f.name}</span>
               <span className="collection-folder-count">{f.item_count}</span>
             </button>
@@ -655,7 +668,7 @@ export default function CollectionPage() {
                 setFolderMenuOpenId((id) => (id === f.id ? null : f.id));
               }}
             >
-              ⋯
+              <Icon name="more-1-line" size={14} />
             </button>
             {folderMenuOpenId === f.id && (
               <div className="collection-folder-dropdown">
@@ -694,7 +707,7 @@ export default function CollectionPage() {
           }}
           title="New folder"
         >
-          <ShelfIcon className="collection-folder-chip-icon" />+
+          <Icon name="new-folder-line" size={14} className="collection-folder-chip-icon" />
         </button>
       </div>
 
@@ -704,8 +717,8 @@ export default function CollectionPage() {
         <EmptyCollectionState inFolder={activeFolderId != null} />
       ) : displayItems.length === 0 ? (
         <div className="collection-empty">
-          <p className="collection-empty-title">No images match this filter</p>
-          <p className="collection-empty-hint">Try a different orientation filter.</p>
+          <p className="collection-empty-title">Nothing matches these filters</p>
+          <p className="collection-empty-hint">Try a different type or orientation filter.</p>
         </div>
       ) : (
         <div className="collection-sections">
@@ -740,66 +753,32 @@ export default function CollectionPage() {
                           />
                         </label>
                       )}
-                      <CollectionImage imageId={item.id} className="collection-thumb" />
+                      <CollectionThumb item={item} className="collection-thumb" />
+                      {isModel3d(item) && <span className="collection-kind-badge">GLB</span>}
                       <div className="collection-overlay">
                         <div className="collection-overlay-actions" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            className="collection-action-btn"
-                            title="Copy to clipboard"
-                            onClick={() => handleCopy(item)}
-                          >
-                            <svg
-                              width="16"
-                              height="16"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
+                          {!isModel3d(item) && (
+                            <button
+                              className="collection-action-btn"
+                              title="Copy to clipboard"
+                              onClick={() => handleCopy(item)}
                             >
-                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                            </svg>
-                          </button>
+                              <Icon name="copy-2-line" size={16} />
+                            </button>
+                          )}
                           <button
                             className="collection-action-btn"
-                            title="Download"
+                            title={isModel3d(item) ? 'Download GLB' : 'Download'}
                             onClick={() => handleDownload(item)}
                           >
-                            <svg
-                              width="16"
-                              height="16"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            >
-                              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                              <polyline points="7 10 12 15 17 10" />
-                              <line x1="12" y1="15" x2="12" y2="3" />
-                            </svg>
+                            <Icon name="download-2-line" size={16} />
                           </button>
                           <button
                             className="collection-action-btn danger"
                             title="Delete"
                             onClick={() => setDeleteTarget(item)}
                           >
-                            <svg
-                              width="16"
-                              height="16"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            >
-                              <polyline points="3 6 5 6 21 6" />
-                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                            </svg>
+                            <Icon name="delete-2-line" size={16} />
                           </button>
                         </div>
                         {item.width && item.height && (
@@ -829,52 +808,58 @@ export default function CollectionPage() {
                 navigateLightbox(-1);
               }}
             >
-              ‹
+              <Icon name="left-line" size={22} />
             </button>
           )}
-          <div className="lightbox-content" onClick={(e) => e.stopPropagation()}>
-            <CollectionImage imageId={lightbox.id} className="lightbox-image" />
-            <div className="lightbox-bar">
-              <span className="lightbox-info">
-                {lightbox.width && lightbox.height
-                  ? `${lightbox.width} x ${lightbox.height}`
-                  : lightbox.filename}
-                {' — '}
-                {formatDate(lightbox.created_at)}
-                {displayItems.length > 1 && lightboxIndex >= 0 && (
-                  <> · {lightboxIndex + 1} / {displayItems.length}</>
-                )}
-              </span>
-              <div className="lightbox-actions">
-                <button className="lightbox-btn" onClick={() => handleCopy(lightbox)} title="Copy to clipboard">
-                  Copy
-                </button>
-                <button className="lightbox-btn" onClick={() => handleDownload(lightbox)} title="Download">
-                  Download
-                </button>
-                <button
-                  className="lightbox-btn danger"
-                  onClick={() => setDeleteTarget(lightbox)}
-                  title="Delete"
-                >
-                  Delete
-                </button>
+          <div className="lightbox-content-wrap" onClick={(e) => e.stopPropagation()}>
+            <div className="lightbox-content">
+              <CollectionThumb item={lightbox} className="lightbox-image" />
+              <GenerationMetaInfo
+                className="lightbox-gen-meta"
+                meta={{
+                  prompt: lightbox.prompt,
+                  seed: lightbox.seed,
+                  model: lightbox.model,
+                }}
+              />
+              <div className="lightbox-bar">
+                <span className="lightbox-info">
+                  {isModel3d(lightbox)
+                    ? '3D model (GLB)'
+                    : lightbox.width && lightbox.height
+                      ? `${lightbox.width} x ${lightbox.height}`
+                      : lightbox.filename}
+                  {' — '}
+                  {formatDate(lightbox.created_at)}
+                  {displayItems.length > 1 && lightboxIndex >= 0 && (
+                    <> · {lightboxIndex + 1} / {displayItems.length}</>
+                  )}
+                </span>
+                <div className="lightbox-actions">
+                  {!isModel3d(lightbox) && (
+                    <button className="lightbox-btn" onClick={() => handleCopy(lightbox)} title="Copy to clipboard">
+                      Copy
+                    </button>
+                  )}
+                  <button
+                    className="lightbox-btn"
+                    onClick={() => handleDownload(lightbox)}
+                    title={isModel3d(lightbox) ? 'Download GLB' : 'Download'}
+                  >
+                    Download
+                  </button>
+                  <button
+                    className="lightbox-btn danger"
+                    onClick={() => setDeleteTarget(lightbox)}
+                    title="Delete"
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
             </div>
-            <button className="lightbox-close" onClick={() => setLightbox(null)}>
-              <svg
-                width="24"
-                height="24"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
+            <button className="lightbox-close" onClick={() => setLightbox(null)} aria-label="Close" title="Close">
+              <Icon name="close-line" size={24} />
             </button>
           </div>
           {displayItems.length > 1 && (
@@ -887,7 +872,7 @@ export default function CollectionPage() {
                 navigateLightbox(1);
               }}
             >
-              ›
+              <Icon name="right-line" size={22} />
             </button>
           )}
         </div>
@@ -896,7 +881,9 @@ export default function CollectionPage() {
       {deleteTarget && (
         <div className="confirm-overlay" onClick={() => setDeleteTarget(null)}>
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
-            <p>Delete this image? This cannot be undone.</p>
+            <p>
+              Delete this {isModel3d(deleteTarget) ? '3D model' : 'image'}? This cannot be undone.
+            </p>
             <div className="confirm-buttons">
               <button className="confirm-btn confirm-btn-cancel" onClick={() => setDeleteTarget(null)}>
                 Cancel
@@ -913,7 +900,7 @@ export default function CollectionPage() {
         <div className="confirm-overlay" onClick={() => setBulkDeleteOpen(false)}>
           <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
             <p>
-              Delete {selectedIds.size} image{selectedIds.size !== 1 ? 's' : ''}? This cannot be undone.
+              Delete {selectedIds.size} item{selectedIds.size !== 1 ? 's' : ''}? This cannot be undone.
             </p>
             <div className="confirm-buttons">
               <button className="confirm-btn confirm-btn-cancel" onClick={() => setBulkDeleteOpen(false)}>
@@ -985,7 +972,7 @@ export default function CollectionPage() {
           <div className="confirm-dialog collection-delete-folder-dialog" onClick={(e) => e.stopPropagation()}>
             <p className="collection-modal-title">Delete “{deleteFolderTarget.name}”?</p>
             <p className="collection-modal-hint">
-              Remove the folder only — images go back to Unfiled — or delete the folder and every image inside it.
+              Remove the folder only — items go back to Unfiled — or delete the folder and everything inside it.
             </p>
             <div className="confirm-buttons collection-delete-folder-buttons">
               <button className="confirm-btn confirm-btn-cancel" onClick={() => setDeleteFolderTarget(null)}>

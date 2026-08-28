@@ -3,81 +3,12 @@ import base64
 import io
 from collections import defaultdict, deque
 from typing import Any
-from nodes.tool_nodes import execute_tool_node
+from nodes.tool_nodes import execute_remove_bg_node, execute_tool_node
 from nodes.value_nodes import execute_value_node
 from nodes.read_nodes import execute_read_node
 from nodes.io_nodes import execute_io_node
-from nodes.ai_nodes import _apply_resolution_output, execute_ai_node, resolve_gemini_api_key
+from nodes.ai_nodes import execute_ai_node
 from nodes.text_nodes import execute_text_node
-
-
-async def _safe_execute_nano_banana_pro(data: dict, inputs: dict) -> dict:
-    """Run Nano Banana Pro, retrying with a minimal request when the API
-    rejects one of the optional generation parameters."""
-    result = await execute_ai_node('nanoBananaPro', data, inputs)
-
-    if not isinstance(result, dict) or 'error' not in result:
-        return result
-
-    err = result['error']
-    if 'not supported' not in err.lower() and 'extra_forbidden' not in err.lower():
-        return result
-
-    try:
-        from google import genai
-        from google.genai import types
-    except ImportError:
-        return result
-
-    api_key = resolve_gemini_api_key(data)
-    prompt = inputs.get('prompt') or data.get('prompt', '')
-    if not api_key or not prompt:
-        return result
-
-    client = genai.Client(api_key=api_key)
-    gen_config = types.GenerateContentConfig(response_modalities=['IMAGE'])
-
-    contents: list = []
-    for key in ('referenceImage1', 'referenceImage2',
-                'referenceImage3', 'referenceImage4'):
-        img = inputs.get(key)
-        if img:
-            raw = img.split(',', 1)[1] if ',' in img else img
-            contents.append(
-                types.Part.from_bytes(
-                    data=base64.b64decode(raw), mime_type='image/png'))
-    contents.append(prompt)
-
-    def _gen():
-        return client.models.generate_content(
-            model='gemini-3-pro-image-preview',
-            contents=contents,
-            config=gen_config,
-        )
-
-    try:
-        response = await asyncio.to_thread(_gen)
-    except Exception as e2:
-        return {'error': f'Nano Banana Pro: API call failed — {e2}'}
-
-    candidates = getattr(response, 'candidates', None)
-    if not candidates:
-        return {'error': 'Nano Banana Pro: API returned no candidates.'}
-
-    parts = candidates[0].content.parts if candidates[0].content else []
-    for part in parts:
-        inline = getattr(part, 'inline_data', None)
-        if inline and inline.data:
-            img_bytes = inline.data
-            mime = getattr(inline, 'mime_type', None) or 'image/png'
-            if isinstance(img_bytes, str):
-                img_bytes = base64.b64decode(img_bytes)
-            resolution = data.get('resolution', '1k')
-            img_bytes = _apply_resolution_output(img_bytes, resolution, mime)
-            b64 = base64.b64encode(img_bytes).decode('ascii')
-            return {'image': f'data:{mime};base64,{b64}'}
-
-    return {'error': 'Nano Banana Pro: response contained no image data'}
 
 _cancel_event = asyncio.Event()
 
@@ -100,15 +31,30 @@ def is_cancelled() -> bool:
 TOOL_TYPES = {
     'resize', 'crop', 'blur', 'rotate', 'editor', 'compositor', 'vignette',
     'getChannel', 'setMask', 'simpleCombine', 'removeBg', 'keyColor', 'stackImages', 'divider',
+    'adjustments',
 }
-VALUE_TYPES = {'numberValue', 'colorValue'}
+# Tool nodes that call fal and therefore have to be awaited.
+ASYNC_TOOL_TYPES = {'removeBg'}
+VALUE_TYPES = {'numberValue', 'colorValue', 'math', 'boolean'}
 TEXT_TYPES = {'prompt', 'combinePrompts', 'refMapper', 'sketch2Final', 'studio'}
-READ_TYPES = {'getImageSize', 'getColorPalette'}
-IO_TYPES = {'importImage', 'exportImage', 'preview'}
-AI_TYPES = {'nanoBananaPro', 'nanoBanana2', 'nanoBanana2Free', 'imageScfPrompt', 'gptImage2', 'falAi'}
+READ_TYPES = {'getImageSize', 'getColorPalette', 'pickRandom'}
+IO_TYPES = {'importImage', 'import3d', 'exportImage', 'export3d', 'preview', 'preview3d'}
+
+# IO nodes whose single input is a mesh descriptor, not an image. Used to pick
+# the right default target handle and the right bypass passthrough key.
+MODEL_INPUT_TYPES = {'export3d', 'preview3d'}
+
+# Node types we no longer execute. They stay dispatchable so a workflow saved
+# before the fal-only migration still loads and fails with an instruction,
+# rather than silently producing nothing.
+LEGACY_AI_TYPES = {'nanoBananaPro', 'nanoBanana2', 'nanoBanana2Free', 'gptImage2'}
+AI_TYPES = {'imageScfPrompt', 'falAi', 'imageTo3d', 'upscaler'} | LEGACY_AI_TYPES
 
 # AI nodes that output text on the `text` handle (bypass must not force image passthrough).
 AI_TEXT_OUTPUT_TYPES = {'imageScfPrompt'}
+
+# AI nodes that output a mesh descriptor on the `model` handle.
+AI_MODEL_OUTPUT_TYPES = {'imageTo3d'}
 
 
 def _find_connected_node_ids(nodes: list[dict], edges: list[dict]) -> set[str]:
@@ -175,11 +121,15 @@ def resolve_inputs(
             elif not source_handle and 'image' in source_outputs:
                 # Multi-output nodes (e.g. keyColor): default to main image when handle omitted.
                 val = source_outputs['image']
+            elif not source_handle and 'model' in source_outputs:
+                val = source_outputs['model']
             if val is not None:
                 th = target_handle
                 if not th and node_map:
                     nt = node_map.get(node_id, {}).get('type')
-                    if nt in IO_TYPES:
+                    if nt in MODEL_INPUT_TYPES:
+                        th = 'model'
+                    elif nt in IO_TYPES:
                         th = 'image'
                 if not th:
                     continue
@@ -187,7 +137,31 @@ def resolve_inputs(
     return inputs
 
 
-def _save_image_to_collection(data_url: str, workflow_id: str | None = None):
+def _upstream_gen_meta(
+    node_id: str,
+    edges: list[dict],
+    gen_meta: dict[str, dict],
+) -> dict | None:
+    """Walk upstream edges and return the nearest ancestor generation metadata."""
+    for e in edges:
+        if e.get('target') != node_id:
+            continue
+        src = e.get('source')
+        if not src:
+            continue
+        if src in gen_meta:
+            return gen_meta[src]
+        nested = _upstream_gen_meta(src, edges, gen_meta)
+        if nested:
+            return nested
+    return None
+
+
+def _save_image_to_collection(
+    data_url: str,
+    workflow_id: str | None = None,
+    meta: dict | None = None,
+):
     """Extract bytes from a data-URL and persist to the collection store."""
     try:
         from persistence import get_persistence
@@ -220,6 +194,9 @@ def _save_image_to_collection(data_url: str, workflow_id: str | None = None):
             else LEGACY_OWNER_SENTINEL
         )
         store = get_persistence()
+        prompt = (meta or {}).get('prompt')
+        seed = (meta or {}).get('seed')
+        model = (meta or {}).get('model')
         store.add_to_collection(
             owner,
             img_bytes,
@@ -227,6 +204,67 @@ def _save_image_to_collection(data_url: str, workflow_id: str | None = None):
             workflow_id=workflow_id,
             width=width,
             height=height,
+            prompt=prompt if isinstance(prompt, str) else None,
+            seed=int(seed) if seed is not None else None,
+            model=model if isinstance(model, str) else None,
+        )
+    except Exception:
+        pass
+
+
+def _save_model_to_collection(
+    model_descriptor: dict,
+    thumbnail: str | None = None,
+    workflow_id: str | None = None,
+    meta: dict | None = None,
+):
+    """Persist a generated mesh to the collection so it stays downloadable
+    after the workflow that made it has moved on.
+
+    The GLB is read back from `MODELS_DIR` — it never travels through the
+    result payload as base64 — and the generator's render is stored beside it
+    as the item's thumbnail, which is what the node itself displays.
+    """
+    try:
+        from persistence import get_persistence
+        from database import LEGACY_OWNER_SENTINEL
+        from request_context import get_run_context
+        from nodes.io_nodes import resolve_model_path
+
+        path = resolve_model_path(str(model_descriptor.get('assetId') or ''))
+        if not path:
+            return
+        with open(path, 'rb') as f:
+            raw = f.read()
+        if not raw:
+            return
+
+        thumb_bytes, thumb_ext = None, 'png'
+        if isinstance(thumbnail, str) and ',' in thumbnail:
+            header, b64 = thumbnail.split(',', 1)
+            try:
+                thumb_bytes = base64.b64decode(b64)
+            except Exception:
+                thumb_bytes = None
+            if 'jpeg' in header or 'jpg' in header:
+                thumb_ext = 'jpg'
+            elif 'webp' in header:
+                thumb_ext = 'webp'
+
+        ctx = get_run_context()
+        owner = ctx.owner_uid if ctx and ctx.owner_uid else LEGACY_OWNER_SENTINEL
+        prompt = (meta or {}).get('prompt')
+        seed = (meta or {}).get('seed')
+        model = (meta or {}).get('model')
+        get_persistence().add_model_to_collection(
+            owner,
+            raw,
+            thumb_bytes=thumb_bytes,
+            thumb_ext=thumb_ext,
+            workflow_id=workflow_id,
+            prompt=prompt if isinstance(prompt, str) else None,
+            seed=int(seed) if seed is not None else None,
+            model=model if isinstance(model, str) else None,
         )
     except Exception:
         pass
@@ -248,10 +286,17 @@ async def run_workflow_streaming(
     - Nodes marked as bypassed pass through the first input unchanged.
     - If a node produces an error, every downstream node that depends on it
       is also skipped so the workflow doesn't cascade broken data.
+    - `pre_outputs` (node id -> output handle -> value) pre-seeds outputs for
+      nodes that should be treated as already-computed (e.g. a group run
+      referencing an outside node's cached result). Those nodes never
+      execute and never appear in the results/progress stream — they just
+      supply real inputs to the nodes that do run.
     """
     all_nodes = workflow['nodes']
     edges = workflow['edges']
     workflow_id = workflow.get('workflow_id')
+    pre_outputs: dict[str, dict] = workflow.get('pre_outputs') or {}
+    preseeded_ids = {n['id'] for n in all_nodes} & set(pre_outputs.keys())
 
     connected_ids = _find_connected_node_ids(all_nodes, edges)
 
@@ -260,6 +305,8 @@ async def run_workflow_streaming(
     for n in all_nodes:
         nid = n['id']
         data = n.get('data', {})
+        if nid in preseeded_ids:
+            continue
         if nid not in connected_ids:
             skipped_ids.add(nid)
             continue
@@ -272,6 +319,7 @@ async def run_workflow_streaming(
         n for n in all_nodes
         if n['id'] in connected_ids and n.get('data', {}).get('bypassed', False)
     ]
+    preseeded_nodes = [n for n in all_nodes if n['id'] in preseeded_ids]
 
     active_edges = [
         e for e in edges
@@ -279,7 +327,7 @@ async def run_workflow_streaming(
         and e['target'] not in (skipped_ids - {n['id'] for n in bypassed_nodes})
     ]
 
-    runnable_nodes = nodes_to_run + bypassed_nodes
+    runnable_nodes = nodes_to_run + bypassed_nodes + preseeded_nodes
     node_map = {n['id']: n for n in all_nodes}
     order = topological_sort(
         [{'id': n['id']} for n in runnable_nodes],
@@ -287,8 +335,9 @@ async def run_workflow_streaming(
     )
 
     failed_ids: set[str] = set()
-    outputs: dict[str, dict[str, Any]] = {}
+    outputs: dict[str, dict[str, Any]] = {nid: dict(vals) for nid, vals in pre_outputs.items()}
     results: dict[str, Any] = {}
+    gen_meta: dict[str, dict] = {}
 
     skipped_disconnected = [
         nid for nid in skipped_ids
@@ -316,6 +365,11 @@ async def run_workflow_streaming(
             if progress_callback:
                 await progress_callback('cancelled', {})
             break
+
+        if node_id in preseeded_ids:
+            # Output already supplied via pre_outputs — never executes, never
+            # reported, so it doesn't flash as running/completed in the UI.
+            continue
 
         node = node_map[node_id]
         node_type = node['type']
@@ -345,12 +399,19 @@ async def run_workflow_streaming(
             if first_input_val is not None:
                 if node_type in TOOL_TYPES:
                     outputs[node_id] = {'image': first_input_val}
+                elif node_type == 'pickRandom':
+                    outputs[node_id] = {'out': first_input_val}
                 elif node_type in AI_TEXT_OUTPUT_TYPES:
                     outputs[node_id] = {'text': ''}
+                elif node_type in AI_MODEL_OUTPUT_TYPES or node_type in MODEL_INPUT_TYPES:
+                    outputs[node_id] = {'model': first_input_val}
                 elif node_type in AI_TYPES or node_type in IO_TYPES:
                     outputs[node_id] = {'image': first_input_val}
                 else:
                     outputs[node_id] = {'value': first_input_val}
+                inherited = _upstream_gen_meta(node_id, edges, gen_meta)
+                if inherited:
+                    gen_meta[node_id] = inherited
             else:
                 outputs[node_id] = {}
             results[node_id] = {'bypassed': True}
@@ -361,7 +422,9 @@ async def run_workflow_streaming(
             continue
 
         try:
-            if node_type in TOOL_TYPES:
+            if node_type in ASYNC_TOOL_TYPES:
+                node_outputs = await execute_remove_bg_node(node_data, inputs)
+            elif node_type in TOOL_TYPES:
                 node_outputs = execute_tool_node(node_type, node_data, inputs)
             elif node_type in VALUE_TYPES:
                 node_outputs = execute_value_node(node_type, node_data, inputs)
@@ -371,8 +434,6 @@ async def run_workflow_streaming(
                 node_outputs = execute_read_node(node_type, node_data, inputs)
             elif node_type in IO_TYPES:
                 node_outputs = execute_io_node(node_type, node_data, inputs)
-            elif node_type == 'nanoBananaPro':
-                node_outputs = await _safe_execute_nano_banana_pro(node_data, inputs)
             elif node_type in AI_TYPES:
                 node_outputs = await execute_ai_node(node_type, node_data, inputs)
             else:
@@ -384,10 +445,47 @@ async def run_workflow_streaming(
                 outputs[node_id] = {}
             else:
                 outputs[node_id] = node_outputs
-                results[node_id] = node_outputs
+                result_payload = (
+                    dict(node_outputs) if isinstance(node_outputs, dict) else {}
+                )
 
-                if node_type in AI_TYPES and isinstance(node_outputs, dict) and 'image' in node_outputs:
-                    _save_image_to_collection(node_outputs['image'], workflow_id=workflow_id)
+                meta = None
+                if isinstance(node_outputs, dict):
+                    meta = node_outputs.get('_meta')
+                if meta:
+                    gen_meta[node_id] = meta
+                elif isinstance(node_outputs, dict) and node_outputs.get('image'):
+                    inherited = _upstream_gen_meta(node_id, edges, gen_meta)
+                    if inherited:
+                        gen_meta[node_id] = inherited
+
+                if node_type == 'preview' and node_id in gen_meta:
+                    result_payload = {**result_payload, '_meta': gen_meta[node_id]}
+
+                results[node_id] = result_payload
+
+                if (
+                    node_type in AI_TYPES
+                    and isinstance(node_outputs, dict)
+                    and 'image' in node_outputs
+                ):
+                    _save_image_to_collection(
+                        node_outputs['image'],
+                        workflow_id=workflow_id,
+                        meta=node_outputs.get('_meta'),
+                    )
+
+                if (
+                    node_type in AI_MODEL_OUTPUT_TYPES
+                    and isinstance(node_outputs, dict)
+                    and isinstance(node_outputs.get('model'), dict)
+                ):
+                    _save_model_to_collection(
+                        node_outputs['model'],
+                        thumbnail=node_outputs.get('thumbnail'),
+                        workflow_id=workflow_id,
+                        meta=node_outputs.get('_meta'),
+                    )
 
         except Exception as e:
             failed_ids.add(node_id)

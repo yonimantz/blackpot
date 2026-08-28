@@ -2,17 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
 import { getConnectedImageDataUrl } from './upstreamImage';
 import { encodeCanvasPreview } from './previewEncoding';
-
-interface LayerCfg {
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  rotation?: number;
-  flipH?: boolean;
-  opacity?: number;
-  hidden?: boolean;
-}
+import { drawEditorComposite, fitLayerToBg, type EditorLayerCfg } from './editorComposite';
 
 function loadImage(src: string): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
@@ -30,6 +20,13 @@ function loadImage(src: string): Promise<HTMLImageElement | null> {
  * whether the editor modal is open. This keeps downstream nodes (Preview,
  * Export, etc.) and the inline node thumbnail in sync with visibility toggles
  * before the user runs the workflow.
+ *
+ * Also owns "auto-fit on connect": a layer with no explicit width/height yet
+ * (freshly wired up) is scaled/centered to contain-fit the BG here, on the
+ * node itself, so the fitted values exist in the store before the editor
+ * modal is ever opened. `EditorCanvasPreview` reads the same resolved values
+ * (via `resolveLayerBox`/`drawEditorComposite`), so the modal can never show
+ * something different from this thumbnail.
  */
 export function useEditorPreviewBake(nodeId: string, data: Record<string, any>): void {
   const edges = useWorkflowStore((s) => s.edges);
@@ -37,11 +34,11 @@ export function useEditorPreviewBake(nodeId: string, data: Record<string, any>):
   const updateNodeData = useWorkflowStore((s) => s.updateNodeData);
 
   const layerCount = (data.layerCount as number) || 0;
-  const layers = (data.layers as Record<string, LayerCfg>) || {};
+  const layers = (data.layers as Record<string, EditorLayerCfg>) || {};
   const bgHidden = Boolean(data.bgHidden);
 
   const lastUrlRef = useRef<string | null>(null);
-  const cancelRef = useRef(false);
+  const autoFittedRef = useRef<Set<string>>(new Set());
 
   const bgSrc = getConnectedImageDataUrl(nodeId, 'bgLayer', edges, allNodes);
   const layerSrcs: (string | null)[] = [];
@@ -66,7 +63,6 @@ export function useEditorPreviewBake(nodeId: string, data: Record<string, any>):
   );
 
   useEffect(() => {
-    cancelRef.current = false;
     if (!bgSrc) return;
 
     let aborted = false;
@@ -79,35 +75,54 @@ export function useEditorPreviewBake(nodeId: string, data: Record<string, any>):
       );
       if (aborted) return;
 
-      const cw = bg.naturalWidth;
-      const ch = bg.naturalHeight;
+      const bgW = bg.naturalWidth;
+      const bgH = bg.naturalHeight;
+
+      let fitChanged = false;
+      const fittedLayers = { ...layers };
+      for (let i = 1; i <= layerCount; i++) {
+        const key = `layer${i}`;
+        const img = layerImages[i - 1];
+        const fitKey = `${nodeId}:${key}`;
+        if (!img || autoFittedRef.current.has(fitKey)) continue;
+        const cfg = fittedLayers[key] || {};
+        if ((cfg.width ?? 0) === 0 && (cfg.height ?? 0) === 0) {
+          fittedLayers[key] = fitLayerToBg(cfg, img, bgW, bgH);
+          autoFittedRef.current.add(fitKey);
+          fitChanged = true;
+        }
+      }
+      if (fitChanged) {
+        // The resulting data change re-triggers this effect with real sizes,
+        // which is when the bake below actually runs.
+        updateNodeData(nodeId, { layers: fittedLayers });
+        return;
+      }
+
+      const images: Record<string, HTMLImageElement> = {};
+      for (let i = 0; i < layerCount; i++) {
+        const img = layerImages[i];
+        if (img) images[`layer${i + 1}`] = img;
+      }
+
       const canvas = document.createElement('canvas');
-      canvas.width = cw;
-      canvas.height = ch;
+      canvas.width = bgW;
+      canvas.height = bgH;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      if (!bgHidden) {
-        ctx.drawImage(bg, 0, 0, cw, ch);
-      }
-
-      for (let i = 0; i < layerCount; i++) {
-        const img = layerImages[i];
-        if (!img) continue;
-        const cfg = layers[`layer${i + 1}`] || {};
-        if (cfg.hidden) continue;
-        const w = (cfg.width ?? 0) > 0 ? (cfg.width as number) : img.naturalWidth;
-        const h = (cfg.height ?? 0) > 0 ? (cfg.height as number) : img.naturalHeight;
-        const rad = ((cfg.rotation ?? 0) * Math.PI) / 180;
-        const opacity = Math.max(0, Math.min(1, Number(cfg.opacity ?? 1)));
-        ctx.save();
-        ctx.globalAlpha = opacity;
-        ctx.translate((cfg.x ?? 0), (cfg.y ?? 0));
-        ctx.rotate(rad);
-        if (cfg.flipH) ctx.scale(-1, 1);
-        ctx.drawImage(img, -w / 2, -h / 2, w, h);
-        ctx.restore();
-      }
+      drawEditorComposite(ctx, {
+        bgImg: bg,
+        bgW,
+        bgH,
+        bgHidden,
+        layerCount,
+        layers,
+        images,
+        scale: 1,
+        offsetX: 0,
+        offsetY: 0,
+      });
 
       let url: string;
       try {

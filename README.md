@@ -8,7 +8,7 @@ A node-based workflow editor for image generation and manipulation (React + Vite
 |------|---------|
 | `frontend/` | React app (Vite, XYFlow canvas) |
 | `backend/` | FastAPI API, workflow engine, local SQLite persistence |
-| `docs/` | [Installing](docs/INSTALL.md), [Gemini API keys](docs/GEMINI_API_KEYS.md) |
+| `docs/` | [Installing](docs/INSTALL.md), [fal.ai API keys](docs/FAL_API_KEYS.md) |
 | `packaging/` | PyInstaller spec, Inno Setup script, icon, `build.bat` |
 | `run.bat` | Windows: starts backend and frontend, opens the browser |
 
@@ -46,7 +46,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Runs at `http://localhost:8000`. API keys are normally saved from the in-app **Settings** page (stored in the local SQLite DB); a `GEMINI_API_KEY` in `backend/.env` works as a fallback. See [docs/GEMINI_API_KEYS.md](docs/GEMINI_API_KEYS.md).
+Runs at `http://localhost:8000`. The fal.ai key is normally saved from the in-app **Settings** page (stored in the local SQLite DB); a `FAL_KEY` in `backend/.env` works as a fallback. See [docs/FAL_API_KEYS.md](docs/FAL_API_KEYS.md).
 
 ### Frontend (React)
 
@@ -70,15 +70,13 @@ winget install --id JRSoftware.InnoSetup
 packaging\build.bat
 ```
 
-Three steps: build the frontend, package it with the backend into `packaging\dist\SpotOn\SpotOn.exe` (~320 MB, one folder), then wrap that folder into `packaging\SpotOn-Setup.exe` (~87 MB) — the single file you hand to someone else. If Inno Setup is missing, the build stops after the app folder and says so, which is enough for testing locally.
+Three steps: build the frontend, package it with the backend into `packaging\dist\SpotOn\SpotOn.exe` (~83 MB, one folder), then wrap that folder into `packaging\SpotOn-Setup.exe` (~29 MB) — the single file you hand to someone else. If Inno Setup is missing, the build stops after the app folder and says so, which is enough for testing locally.
 
 The console window the app opens is its on/off switch — closing it stops the server.
 
-The installer is per-user: it needs no administrator rights, installs into `%LOCALAPPDATA%\Programs\SpotOn`, and an uninstall deliberately leaves `%APPDATA%\SpotOn` untouched so workflows and images survive it. Reinstalling over an existing copy upgrades it in place, which depends on `AppId` in `packaging\spoton.iss` never changing. Bump `MyAppVersion` there when handing out a new build. [docs/INSTALL.md](docs/INSTALL.md) is written for the recipient, so send it along.
+The installer is per-user: it needs no administrator rights, installs into `%LOCALAPPDATA%\Programs\SpotOn`, and an uninstall deliberately leaves `%APPDATA%\SpotOn` untouched so workflows and images survive it. Reinstalling over an existing copy upgrades it in place, which depends on `AppId` in `packaging\spoton.iss` never changing. Before handing out a new build, bump `backend\version.py` and the matching `version` in `frontend\package.json` — the build refuses to run while those two disagree, and everything else (the installer, `/api/health`, the Settings page) reads the version from there. The previous installer is kept in `packaging\archive\` for rollback. [docs/INSTALL.md](docs/INSTALL.md) is written for the recipient, so send it along.
 
 It is not code-signed, so Windows shows a SmartScreen "unknown publisher" warning that the recipient has to click through. Silencing that needs a paid certificate.
-
-The Remove Background model is not bundled. `rembg` downloads it (~168 MB) into `%USERPROFILE%\.u2net` the first time that node runs, which needs an internet connection but keeps the installer far smaller.
 
 `packaging\SpotOn.ico` is committed. Regenerate it with `python packaging\make_icon.py` only after changing the SVG mark or the colours in that script; it needs the two optional build dependencies.
 
@@ -91,6 +89,7 @@ Everything the app writes lives in `%APPDATA%\SpotOn` (never inside the program 
 | `spoton.db` | Workflows, collection metadata, saved API keys |
 | `collection/` | Generated images |
 | `uploads/` | Imported source images |
+| `models/` | Generated 3D meshes (GLB) |
 | `exports/` | Default destination for the Export node |
 | `.env` | Optional keys for an installed copy (a dev checkout uses `backend/.env` instead) |
 
@@ -110,9 +109,9 @@ Set `SPOTON_DATA_DIR` to put that tree somewhere else — useful for a portable 
 
 ## Node types
 
-- **I/O**: Import Image, Export Image, Preview
+- **I/O**: Import Image, Export Image, Export 3D, Preview, Preview 3D (orbitable mesh view with a grid floor, adjustable key/fill light and shadow, and a corner axis navigator; passes the mesh through to Export 3D)
 - **Tools**: Resize, Crop, Blur, Rotate/Flip, Editor, Compositor, Vignette, Remove Background, Key Color, Stack Images, Divider
 - **Values**: Number, Color Picker
 - **Text**: Prompt, Combine Prompts, Ref Mapper, Sketch to Final, Studio
 - **Read data**: Get Image Size, Get Color Palette
-- **AI**: Gemini (Nano Banana), GPT Image, and fal.ai nodes — keys come from Settings, a per-node `apiKey`, or the environment
+- **AI**: FAL AI (image generation), Image SCF Prompt (image → prompt), Image to 3D, and Upscaler (image → larger image, Real-ESRGAN or Clarity) — every AI call goes to fal.ai, with the key from Settings, a per-node `apiKey`, or `FAL_KEY` in the environment. Remove Background is a fal call too, so it needs the key and an internet connection.

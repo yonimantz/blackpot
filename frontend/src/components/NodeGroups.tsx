@@ -1,12 +1,28 @@
-import { useState, useCallback, useRef } from 'react';
-import { useViewport } from '@xyflow/react';
+import { useCallback, useRef, useState } from 'react';
+import { useViewport, useNodesInitialized, ViewportPortal } from '@xyflow/react';
 import type { Node } from '@xyflow/react';
 import { useWorkflowStore } from '../store/workflowStore';
 import type { NodeGroup } from '../store/workflowStore';
+import { startWorkflowRun, stopWorkflowRun } from '../utils/runWorkflow';
+import Icon from '../icons/Icon';
 
 const PADDING = 24;
 const HEADER_HEIGHT = 36;
 const GROUP_COLOR = '#8b5cf6';
+const FALLBACK_WIDTH = 180;
+const FALLBACK_HEIGHT = 80;
+
+// Right after a workflow (re)loads — e.g. coming back from Collection/Playground —
+// React Flow hasn't measured the freshly mounted node DOM yet, so `measured` is
+// empty for a frame. Fall back to the node's own explicit/initial size (persisted
+// for resizable nodes like Preview) before resorting to a guessed constant, so the
+// group frame doesn't visibly snap from the wrong size once measurement lands.
+function getNodeSize(node: Node): { width: number; height: number } {
+  return {
+    width: node.measured?.width ?? node.width ?? node.initialWidth ?? FALLBACK_WIDTH,
+    height: node.measured?.height ?? node.height ?? node.initialHeight ?? FALLBACK_HEIGHT,
+  };
+}
 
 function getGroupBounds(
   group: NodeGroup,
@@ -21,8 +37,7 @@ function getGroupBounds(
   let maxY = -Infinity;
 
   for (const node of groupNodes) {
-    const w = node.measured?.width ?? 180;
-    const h = node.measured?.height ?? 80;
+    const { width: w, height: h } = getNodeSize(node);
     minX = Math.min(minX, node.position.x);
     minY = Math.min(minY, node.position.y);
     maxX = Math.max(maxX, node.position.x + w);
@@ -80,11 +95,15 @@ function GroupBox({
   const ungroupNodes = useWorkflowStore((s) => s.ungroupNodes);
   const updateGroupName = useWorkflowStore((s) => s.updateGroupName);
   const moveGroupNodes = useWorkflowStore((s) => s.moveGroupNodes);
-  const focusedGroupId = useWorkflowStore((s) => s.focusedGroupId);
-  const toggleGroupFocus = useWorkflowStore((s) => s.toggleGroupFocus);
+  const clearCanvasSelection = useWorkflowStore((s) => s.clearCanvasSelection);
+  const isRunning = useWorkflowStore((s) => s.isRunning);
+  const runningGroupId = useWorkflowStore((s) => s.runningGroupId);
+  const getGroupRunPayload = useWorkflowStore((s) => s.getGroupRunPayload);
+  const setHoveredRunGroupId = useWorkflowStore((s) => s.setHoveredRunGroupId);
   const viewport = useViewport();
 
-  const isFocused = focusedGroupId === group.id;
+  const isRunningThisGroup = runningGroupId === group.id;
+  const playDisabled = isRunning && !isRunningThisGroup;
 
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(group.name);
@@ -111,6 +130,7 @@ function GroupBox({
       if ((e.target as HTMLElement).tagName === 'INPUT') return;
       e.stopPropagation();
       e.preventDefault();
+      clearCanvasSelection();
       dragRef.current = { x: e.clientX, y: e.clientY };
 
       const handleMove = (ev: PointerEvent) => {
@@ -130,12 +150,35 @@ function GroupBox({
       window.addEventListener('pointermove', handleMove);
       window.addEventListener('pointerup', handleUp);
     },
-    [group.id, moveGroupNodes]
+    [group.id, moveGroupNodes, clearCanvasSelection]
+  );
+
+  const handlePlayClick = useCallback(
+    async (e: React.MouseEvent) => {
+      e.stopPropagation();
+      setHoveredRunGroupId(null);
+      if (isRunningThisGroup) {
+        await stopWorkflowRun();
+        return;
+      }
+      if (playDisabled) return;
+      await startWorkflowRun(getGroupRunPayload(group.id), { groupId: group.id });
+    },
+    [group.id, isRunningThisGroup, playDisabled, getGroupRunPayload, setHoveredRunGroupId]
+  );
+
+  const onEmptyGroupPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      clearCanvasSelection();
+    },
+    [clearCanvasSelection],
   );
 
   return (
     <div
-      className={`node-group-box${isFocused ? ' node-group-box-focused' : ''}`}
+      className="node-group-box"
       style={{
         left: bounds.x,
         top: bounds.y,
@@ -144,6 +187,26 @@ function GroupBox({
         borderColor: `${GROUP_COLOR}80`,
       }}
     >
+      <div
+        className="node-group-empty-hit"
+        style={{ top: HEADER_HEIGHT, left: 0, right: 0, height: PADDING }}
+        onPointerDown={onEmptyGroupPointerDown}
+      />
+      <div
+        className="node-group-empty-hit"
+        style={{ top: HEADER_HEIGHT + PADDING, left: 0, bottom: 0, width: PADDING }}
+        onPointerDown={onEmptyGroupPointerDown}
+      />
+      <div
+        className="node-group-empty-hit"
+        style={{ top: HEADER_HEIGHT + PADDING, right: 0, bottom: 0, width: PADDING }}
+        onPointerDown={onEmptyGroupPointerDown}
+      />
+      <div
+        className="node-group-empty-hit"
+        style={{ left: PADDING, right: PADDING, bottom: 0, height: PADDING }}
+        onPointerDown={onEmptyGroupPointerDown}
+      />
       <div
         className="node-group-header"
         style={{ background: `${GROUP_COLOR}30` }}
@@ -172,40 +235,39 @@ function GroupBox({
         <div className="node-group-actions">
           <button
             type="button"
-            className={`node-group-btn node-group-btn-focus${isFocused ? ' node-group-btn-focus-active' : ''}`}
-            title="Focus group — run only this group (F). Edges from outside are ignored while focused."
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleGroupFocus(group.id);
-            }}
+            className={`node-group-btn node-group-play-btn${isRunningThisGroup ? ' node-group-play-btn-active' : ''}`}
+            title={isRunningThisGroup ? 'Stop this group' : 'Run only the nodes in this group'}
+            disabled={playDisabled}
+            onClick={handlePlayClick}
+            onMouseEnter={() => setHoveredRunGroupId(group.id)}
+            onMouseLeave={() => setHoveredRunGroupId(null)}
             onPointerDown={(e) => e.stopPropagation()}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
-              <circle cx="12" cy="12" r="3" />
-              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-            </svg>
+            <Icon name={isRunningThisGroup ? 'stop-fill' : 'play-fill'} size={12} />
           </button>
           <button
             className="node-group-btn"
             title="Ungroup"
+            aria-label="Ungroup"
             onClick={(e) => {
               e.stopPropagation();
               ungroupNodes(group.id);
             }}
             onPointerDown={(e) => e.stopPropagation()}
           >
-            ⊟
+            <Icon name="vector-group-line" size={13} />
           </button>
           <button
             className="node-group-btn node-group-btn-danger"
             title="Delete all nodes in group"
+            aria-label="Delete all nodes in group"
             onClick={(e) => {
               e.stopPropagation();
               onRequestDelete();
             }}
             onPointerDown={(e) => e.stopPropagation()}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+            <Icon name="delete-2-line" size={14} />
           </button>
         </div>
       </div>
@@ -214,22 +276,24 @@ function GroupBox({
 }
 
 export default function NodeGroups() {
-  const viewport = useViewport();
   const groups = useWorkflowStore((s) => s.groups);
   const deleteGroupNodes = useWorkflowStore((s) => s.deleteGroupNodes);
   const [confirmGroupId, setConfirmGroupId] = useState<string | null>(null);
+  // Right after the canvas (re)mounts — e.g. coming back from Collection/
+  // Playground/Settings — React Flow hasn't measured the freshly mounted node
+  // DOM yet. Wait for real sizes before drawing frames so groups don't flash
+  // at the wrong bounds while nodes are still settling in.
+  const nodesInitialized = useNodesInitialized();
 
   if (groups.length === 0 && !confirmGroupId) return null;
 
   return (
     <>
-      <div className="node-groups-layer">
-        <div
-          style={{
-            transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
-            transformOrigin: '0 0',
-          }}
-        >
+      {nodesInitialized && (
+        // ViewportPortal renders into the same transformed pane React Flow uses
+        // for nodes/edges, so group frames automatically track pan/zoom and stay
+        // aligned even when the canvas remounts — no manual transform to desync.
+        <ViewportPortal>
           {groups.map((group) => (
             <GroupBox
               key={group.id}
@@ -237,8 +301,8 @@ export default function NodeGroups() {
               onRequestDelete={() => setConfirmGroupId(group.id)}
             />
           ))}
-        </div>
-      </div>
+        </ViewportPortal>
+      )}
 
       {confirmGroupId && (
         <ConfirmDialog

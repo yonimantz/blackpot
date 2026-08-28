@@ -41,7 +41,7 @@ hiddenimports = [
 ]
 
 # Packages that load plugins, data files or compiled extensions dynamically.
-for package in ('rembg', 'onnxruntime', 'google.genai', 'fal_client', 'pymatting'):
+for package in ('fal_client',):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
     binaries += package_binaries
@@ -52,13 +52,10 @@ for package in ('rembg', 'onnxruntime', 'google.genai', 'fal_client', 'pymatting
 for distribution in (
     'fal-client',
     'fastapi',
-    'google-genai',
     'httpx',
     'numpy',
-    'onnxruntime',
     'pillow',
     'python-dotenv',
-    'rembg',
     'uvicorn',
 ):
     datas += copy_metadata(distribution)
@@ -82,9 +79,13 @@ a = Analysis(
         'pytest',
         'setuptools',
         'tkinter',
-        # Reached only through optional branches in scikit-image and friends,
-        # never at runtime here, and worth ~100 MB between them. lxml comes
-        # along with pandas.
+        # Heavyweights that arrived with the old local background remover. Kept
+        # in the exclude list so a stale virtualenv cannot drag them back in.
+        'onnxruntime',
+        'rembg',
+        'pymatting',
+        'scipy',
+        'skimage',
         'pandas',
         'pyarrow',
         'lxml',

@@ -6,6 +6,7 @@ frontend/dist/
 dist/
 packaging/build/
 packaging/SpotOn-Setup.exe
+packaging/archive/
 packaging/SpotOn-icon-preview.png
 
 # Environment and secrets

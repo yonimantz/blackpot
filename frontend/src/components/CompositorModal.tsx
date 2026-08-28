@@ -7,8 +7,9 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
-import { getUploadFileUrl } from '../utils/api';
 import { MAX_COMPOSITOR_LAYERS } from '../types/nodeTypes';
+import { getConnectedImageDataUrl } from '../utils/upstreamImage';
+import Icon from '../icons/Icon';
 import {
   createCompositorLayer,
   distPointSegment,
@@ -18,31 +19,6 @@ import {
   squareCornersWorld,
   squareRotateHandleWorld,
 } from '../compositor/compositorUtils';
-
-function _getConnectedImageSrc(
-  nodeId: string,
-  handleId: string,
-  edges: { source: string; target: string; targetHandle?: string | null }[],
-  allNodes: { id: string; data?: Record<string, any> }[],
-): string | null {
-  const edge = edges.find((e) => e.target === nodeId && e.targetHandle === handleId);
-  if (!edge) return null;
-  const sourceNode = allNodes.find((n) => n.id === edge.source);
-  if (!sourceNode) return null;
-  const d = sourceNode.data;
-  if (typeof d?.fileAssetId === 'string' && d.fileAssetId) {
-    return getUploadFileUrl(d.fileAssetId);
-  }
-  return (
-    d?.fileData ||
-    d?._result?.image ||
-    d?.previewData ||
-    d?._editorPreview ||
-    d?._compositorPreview ||
-    d?._vignettePreview ||
-    null
-  );
-}
 
 function worldToSquareLocal(px: number, py: number, cx: number, cy: number, rotDeg: number) {
   const rad = (rotDeg * Math.PI) / 180;
@@ -180,7 +156,7 @@ export default function CompositorModal({
 
   useEffect(() => {
     if (!open) return;
-    const src = _getConnectedImageSrc(nodeId, 'background', edges, nodes);
+    const src = getConnectedImageDataUrl(nodeId, 'background', edges, nodes);
     if (!src) {
       setBgImg(null);
       return;
@@ -650,8 +626,8 @@ export default function CompositorModal({
       <div className="compositor-modal" role="dialog" aria-labelledby="compositor-modal-title">
         <div className="compositor-modal-header">
           <h2 id="compositor-modal-title">Compositor</h2>
-          <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close">
-            ×
+          <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close" title="Close">
+            <Icon name="close-line" size={18} />
           </button>
         </div>
         <div className="compositor-modal-body">
@@ -695,7 +671,8 @@ export default function CompositorModal({
                   disabled={isRunning || localLayers.length >= MAX_COMPOSITOR_LAYERS}
                   onClick={() => addKind(k)}
                 >
-                  + {k}
+                  <Icon name="add-line" size={11} />
+                  {k}
                 </button>
               ))}
             </div>
@@ -777,8 +754,10 @@ export default function CompositorModal({
                       className="inspector-btn-small danger"
                       disabled={isRunning}
                       onClick={() => removeAt(idx)}
+                      title="Remove layer"
+                      aria-label="Remove layer"
                     >
-                      ×
+                      <Icon name="close-line" size={11} />
                     </button>
                   </li>
                 );

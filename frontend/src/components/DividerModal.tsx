@@ -3,6 +3,7 @@ import { MAX_DIVIDER_OUTPUTS } from '../types/nodeTypes';
 import { useWorkflowStore } from '../store/workflowStore';
 import { getConnectedImageDataUrl } from '../utils/upstreamImage';
 import { remapDividerSourceEdges, type DividerSelection } from '../utils/dividerEdges';
+import Icon from '../icons/Icon';
 
 type DividerTool = 'box' | 'lasso';
 
@@ -266,7 +267,7 @@ export default function DividerModal({
 
     if (!img) {
       ctx.fillStyle = '#9ca3af';
-      ctx.font = '13px Inter, sans-serif';
+      ctx.font = '13px Fredoka, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('Connect an image to Divider', canvas.width / 2, canvas.height / 2);
       return;
@@ -466,8 +467,8 @@ export default function DividerModal({
       <div className="compositor-modal" role="dialog" aria-labelledby="divider-modal-title">
         <div className="compositor-modal-header">
           <h2 id="divider-modal-title">Divider</h2>
-          <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close">
-            ×
+          <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close" title="Close">
+            <Icon name="close-line" size={18} />
           </button>
         </div>
 

@@ -201,7 +201,7 @@ export default function StackImagesCanvasPreview({
       ctx.fillStyle = '#1e1e21';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = '#71717a';
-      ctx.font = '11px Inter, sans-serif';
+      ctx.font = '11px Fredoka, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('Connect images', canvas.width / 2, canvas.height / 2 + 4);
       return;

@@ -16,6 +16,7 @@ import {
   DEFAULT_PREVIEW_NODE_WIDTH,
   DEFAULT_PREVIEW_NODE_HEIGHT,
   isNodeTypePinnable,
+  isResizablePreviewNodeType,
 } from '../types/nodeTypes';
 import type { WorkflowTemplate } from '../types/templateTypes';
 import { reconcileTemplate } from '../types/templateTypes';
@@ -24,8 +25,16 @@ import {
   resolveWorkflowIconTint,
 } from '../constants/workflowIcons';
 import { getWorkflow as fetchWorkflow, saveWorkflow } from '../utils/api';
-import { getNodeImageOutputDataUrl } from '../utils/upstreamImage';
+import { getNodeImageOutputDataUrl, getNodeModel3dOutput } from '../utils/upstreamImage';
 import { assetIsReachable, uploadDataUrlAsAsset } from '../utils/importImageData';
+import { captureModel3dImage } from '../utils/model3dCapture';
+import {
+  collectPersistablePreviews,
+  DEFAULT_PREVIEW_SLOT,
+  PREVIEW_BEARING_FIELDS,
+  uploadPreviewSlot,
+  withoutPreviewAssetRefs,
+} from '../utils/previewAssets';
 
 let nodeIdCounter = 0;
 let groupIdCounter = 0;
@@ -62,11 +71,13 @@ function normalizeEditorDataForRun(data: Record<string, any> | undefined): Recor
 /**
  * Strip regenerable / transient fields from node data before persisting.
  *
- * Image-heavy fields (baked previews, run results) are re-derived from their
- * upstream sources on load (the bake effects re-run), so writing them to disk
- * only bloats the saved JSON, the SQLite `workflows.data` column, and the 3s
- * autosave `JSON.stringify`. We drop every `_`-prefixed key plus `previewData`.
- * Real source data (e.g. `fileData`) is intentionally kept.
+ * Image-heavy fields (baked previews, run results) must never reach the saved
+ * JSON: inlining base64 into the SQLite `workflows.data` column is what made
+ * the 3s autosave `JSON.stringify` and tab switching slow. We drop every
+ * `_`-prefixed key plus `previewData`. Real source data (e.g. `fileData`) is
+ * intentionally kept, as are the `previewAsset*` ids — a few dozen bytes each,
+ * pointing at the file store, which is how previews survive a reload without
+ * their bytes ever entering the graph (see `utils/previewAssets.ts`).
  */
 function stripTransientNodeData(data: Record<string, any> | undefined): Record<string, any> {
   if (!data || typeof data !== 'object') return data ?? {};
@@ -77,6 +88,87 @@ function stripTransientNodeData(data: Record<string, any> | undefined): Record<s
     out[key] = data[key];
   }
   return out;
+}
+
+/** The only `_`-prefixed fields a backend node handler actually reads. */
+const RUN_PAYLOAD_KEPT_UNDERSCORE_FIELDS: ReadonlySet<string> = new Set([
+  '_removeBgBaked',
+  '_keyColorBaked',
+  '_preview3dSnapshot',
+]);
+
+/**
+ * Drop every other `_`-prefixed field before a node's data rides in the run
+ * POST body. These are on-canvas preview bakes (`_cropPreview`, `_resizePreview`,
+ * etc.) that exist purely for the live UI — the backend recomputes the real
+ * output from the real params on every run, so shipping them just inflates
+ * the request for nothing.
+ */
+function stripPreviewFieldsForRun(data: Record<string, any> | undefined): Record<string, any> {
+  if (!data || typeof data !== 'object') return data ?? {};
+  const out: Record<string, any> = {};
+  for (const key of Object.keys(data)) {
+    if (key.startsWith('_') && !RUN_PAYLOAD_KEPT_UNDERSCORE_FIELDS.has(key)) continue;
+    out[key] = data[key];
+  }
+  return out;
+}
+
+/**
+ * Shapes one node for a run POST body. Editor layers are normalized, a 3D
+ * preview rides along with a freshly captured snapshot (the backend has no 3D
+ * renderer, so `execute_io_node` hands that back as the node's `image` output),
+ * and on-canvas preview bakes are dropped. Payload-only: never written to `data`.
+ */
+function toRunNodePayload(node: Node) {
+  let data = node.data as Record<string, any>;
+  if (node.type === 'editor') {
+    data = normalizeEditorDataForRun(data);
+  } else if (node.type === 'preview3d' && !data?.bypassed) {
+    const snapshot = captureModel3dImage(node.id);
+    if (snapshot) data = { ...data, _preview3dSnapshot: snapshot };
+  }
+  data = stripPreviewFieldsForRun(data);
+  return {
+    id: node.id,
+    type: node.type,
+    data,
+    position: node.position,
+    ...(node.style ? { style: node.style } : {}),
+    ...(node.width != null ? { width: node.width } : {}),
+    ...(node.height != null ? { height: node.height } : {}),
+  };
+}
+
+function toRunEdgePayload(edge: Edge) {
+  return {
+    id: edge.id,
+    source: edge.source,
+    target: edge.target,
+    sourceHandle: edge.sourceHandle,
+    targetHandle: edge.targetHandle,
+  };
+}
+
+/**
+ * A node's last known output for one port, in a form the backend can consume,
+ * or null when nothing usable is cached. Image ports must resolve to real image
+ * data — a saved preview only resolves to a URL the backend can't read — so a
+ * node whose only image is a saved preview counts as uncached.
+ */
+function cachedNodeOutput(node: Node, handleId: string | null | undefined): any {
+  const data = (node.data || {}) as Record<string, any>;
+  const outputs = getNodeOutputs(node.type!, data);
+  const port =
+    outputs.find((p) => p.id === handleId) ?? (outputs.length === 1 ? outputs[0] : undefined);
+  if (!port || port.type === 'image') {
+    return getNodeImageOutputDataUrl(data, handleId, node.id, { includeSaved: false });
+  }
+  if (port.type === 'model3d') {
+    return getNodeModel3dOutput(data);
+  }
+  const handleKey = handleId || 'image';
+  return data._result?.[handleKey] ?? data.text ?? data.value ?? null;
 }
 
 /** Set or clear `pinned`, dropping the key entirely when false so saved nodes stay lean. */
@@ -135,6 +227,93 @@ async function migrateInlineImageAssets(
   }
 }
 
+/**
+ * Preview persistence: after an image lands on a node, its bytes go to the file
+ * store and the node keeps only an id (see `utils/previewAssets.ts`).
+ *
+ * Debounced per node so a slider drag or a burst of typing that re-bakes on
+ * every frame pays for one upload rather than dozens, and deduped by source
+ * string so a re-bake that reproduces the same image doesn't re-upload it.
+ */
+const PREVIEW_PERSIST_DEBOUNCE_MS = 1500;
+const previewPersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const previewPersistLastSource = new Map<string, string>();
+
+function resetPreviewPersistState() {
+  for (const timer of previewPersistTimers.values()) clearTimeout(timer);
+  previewPersistTimers.clear();
+  previewPersistLastSource.clear();
+}
+
+function schedulePreviewPersist(
+  get: () => WorkflowState,
+  set: (partial: Partial<WorkflowState>) => void,
+  nodeId: string,
+) {
+  const pending = previewPersistTimers.get(nodeId);
+  if (pending) clearTimeout(pending);
+  previewPersistTimers.set(
+    nodeId,
+    setTimeout(() => {
+      previewPersistTimers.delete(nodeId);
+      void persistNodePreviews(get, set, nodeId);
+    }, PREVIEW_PERSIST_DEBOUNCE_MS),
+  );
+}
+
+async function persistNodePreviews(
+  get: () => WorkflowState,
+  set: (partial: Partial<WorkflowState>) => void,
+  nodeId: string,
+): Promise<void> {
+  const wfId = get().workflowId;
+  if (!wfId) return;
+  const node = get().nodes.find((n) => n.id === nodeId);
+  if (!node) return;
+
+  const uploaded: Record<string, string> = {};
+  for (const [slot, dataUrl] of Object.entries(
+    collectPersistablePreviews(node.data as Record<string, any>),
+  )) {
+    const cacheKey = `${wfId}::${nodeId}::${slot}`;
+    if (previewPersistLastSource.get(cacheKey) === dataUrl) continue;
+    const assetId = await uploadPreviewSlot(wfId, nodeId, slot, dataUrl);
+    if (!assetId) continue;
+    // The user may have switched workflows or deleted the node while the
+    // upload was in flight.
+    if (get().workflowId !== wfId) return;
+    previewPersistLastSource.set(cacheKey, dataUrl);
+    uploaded[slot] = assetId;
+  }
+  if (Object.keys(uploaded).length === 0) return;
+
+  const current = get().nodes.find((n) => n.id === nodeId);
+  if (!current) return;
+  const currentData = current.data as Record<string, any>;
+  const patch: Record<string, any> = { previewAssetRev: Date.now() };
+  if (uploaded[DEFAULT_PREVIEW_SLOT]) {
+    patch.previewAssetId = uploaded[DEFAULT_PREVIEW_SLOT];
+  }
+  const perHandle = Object.entries(uploaded).filter(([slot]) => slot !== DEFAULT_PREVIEW_SLOT);
+  if (perHandle.length > 0) {
+    const existing = currentData.previewAssetIds;
+    patch.previewAssetIds = {
+      ...(existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {}),
+      ...Object.fromEntries(perHandle),
+    };
+  }
+
+  // Written straight to state rather than through `updateNodeData`: this is
+  // background bookkeeping, so it must not land on the undo stack or restart
+  // the persist it was triggered by.
+  set({
+    nodes: get().nodes.map((n) =>
+      n.id === nodeId ? { ...n, data: { ...n.data, ...patch } } : n,
+    ),
+    _dirty: true,
+  });
+}
+
 /** True while applying undo/redo so we do not record new history entries. */
 let applyingHistory = false;
 /** Skip per-frame history for node position updates during drag. */
@@ -171,7 +350,6 @@ interface WorkflowSnapshot {
   nodes: Node[];
   edges: Edge[];
   groups: NodeGroup[];
-  focusedGroupId: string | null;
   selectedNodeId: string | null;
 }
 
@@ -186,14 +364,12 @@ function takeGraphSnapshot(s: {
   nodes: Node[];
   edges: Edge[];
   groups: NodeGroup[];
-  focusedGroupId: string | null;
   selectedNodeId: string | null;
 }): WorkflowSnapshot {
   return {
     nodes: s.nodes,
     edges: s.edges,
     groups: s.groups,
-    focusedGroupId: s.focusedGroupId,
     selectedNodeId: s.selectedNodeId,
   };
 }
@@ -280,30 +456,19 @@ export function findGroupIdForNode(groups: NodeGroup[], nodeId: string): string 
   return null;
 }
 
-/** Stored bypass OR focus overlay (nodes outside focused group appear bypassed). */
-export function isNodeEffectivelyBypassed(
-  nodeId: string,
-  dataBypassed: boolean,
-  focusedGroupId: string | null,
-  groups: NodeGroup[],
-): boolean {
-  if (dataBypassed) return true;
-  if (!focusedGroupId) return false;
-  const g = groups.find((x) => x.id === focusedGroupId);
-  if (!g) return false;
-  return !g.nodeIds.includes(nodeId);
-}
-
 export interface WorkflowState {
   nodes: Node[];
   edges: Edge[];
   groups: NodeGroup[];
-  focusedGroupId: string | null;
   selectedNodeId: string | null;
   isRunning: boolean;
   runResults: Record<string, any>;
   activeNodeId: string | null;
   completedNodeIds: string[];
+  /** Group currently being run via its own Play button, if any. Transient — not undo/dirty tracked. */
+  runningGroupId: string | null;
+  /** Group whose Play button is hovered, for the gentle canvas highlight. Transient — not undo/dirty tracked. */
+  hoveredRunGroupId: string | null;
 
   workflowId: string | null;
   workflowName: string | null;
@@ -333,6 +498,10 @@ export interface WorkflowState {
   onEdgesChange: (changes: EdgeChange[]) => void;
   onConnect: (connection: Connection) => void;
   setSelectedNodeId: (id: string | null) => void;
+  /** Drop every node/edge selection and the inspector target. */
+  clearCanvasSelection: () => void;
+  /** Select exactly this node; Shift+click multi-select is left to React Flow. */
+  selectOnlyNode: (id: string) => void;
   addNode: (type: string, position: { x: number; y: number }, dataOverrides?: Record<string, any>) => void;
   addNodeAndConnectFromHandle: (
     newNodeType: string,
@@ -360,14 +529,34 @@ export interface WorkflowState {
   handleReconnect: (oldEdge: Edge, newConnection: Connection) => void;
   setIsRunning: (running: boolean) => void;
   setRunResults: (results: Record<string, any>) => void;
+  /** Records one node's result mid-run so its error/skipped state shows live. */
+  setNodeRunResult: (id: string, result: any) => void;
   setActiveNodeId: (id: string | null) => void;
   markNodeCompleted: (id: string) => void;
   clearRunProgress: () => void;
+  setRunningGroupId: (id: string | null) => void;
+  setHoveredRunGroupId: (id: string | null) => void;
   getWorkflowJSON: () => { nodes: any[]; edges: any[]; workflow_id?: string | null };
   getRunWorkflowPayload: () => { nodes: any[]; edges: any[]; workflow_id?: string | null };
-  toggleGroupFocus: (groupId: string) => void;
-  clearGroupFocus: () => void;
+  /**
+   * Payload to run only a group's nodes. Every ancestor feeding the group is
+   * resolved so the group never runs against an empty input: one with a usable
+   * cached output is sent as a bare stub pre-seeded via `pre_outputs` and never
+   * re-executes, while one without is pulled into the run and executed.
+   */
+  getGroupRunPayload: (groupId: string) => {
+    nodes: any[];
+    edges: any[];
+    workflow_id?: string | null;
+    pre_outputs: Record<string, Record<string, any>>;
+  };
   duplicateSelectedNodes: () => void;
+  /**
+   * Alt+drag duplicate: leaves an unselected copy of the given nodes (and the edges between
+   * them) behind at their current position. The originals are left untouched so an in-progress
+   * drag keeps moving them.
+   */
+  duplicateNodesInPlace: (nodeIds: string[]) => void;
   createGroupFromSelection: () => void;
   ungroupNodes: (groupId: string) => void;
   deleteGroupNodes: (groupId: string) => void;
@@ -417,7 +606,7 @@ function duplicateSubgraphAtOffset(
       ...node,
       id: newId,
       position: { x: node.position.x + dx, y: node.position.y + dy },
-      data: { ...baseData },
+      data: withoutPreviewAssetRefs({ ...baseData }),
       selected: true,
     };
   });
@@ -440,16 +629,72 @@ function duplicateSubgraphAtOffset(
   });
 }
 
+/**
+ * Clones `nodeIds` (and the edges between them) at their current position, leaving the clones
+ * unselected and the originals completely untouched. Used for Alt+drag duplicate, where the
+ * originals keep dragging under the cursor while a stationary copy is left behind.
+ *
+ * Does not push its own undo snapshot — callers wrap the whole drag gesture in a single undo
+ * entry via `beginMoveUndoSession`.
+ */
+function leaveDuplicateBehind(
+  get: () => WorkflowState,
+  set: (partial: Partial<WorkflowState>) => void,
+  nodeIds: string[],
+): void {
+  const idSet = new Set(nodeIds);
+  const { nodes, edges } = get();
+  const nodesToClone = nodes.filter((n) => idSet.has(n.id));
+  if (nodesToClone.length === 0) return;
+
+  const idMap = new Map<string, string>();
+  const newNodes = nodesToClone.map((node) => {
+    const newId = `node_${++nodeIdCounter}_${Date.now()}`;
+    idMap.set(node.id, newId);
+    const baseData =
+      node.data && typeof node.data === 'object' ? (node.data as Record<string, any>) : {};
+    return {
+      ...node,
+      id: newId,
+      data: withoutPreviewAssetRefs({ ...baseData }),
+      selected: false,
+      dragging: false,
+    };
+  });
+
+  // Duplicate every edge that *feeds into* a duplicated node — this covers both edges
+  // internal to the duplicated set (both ends remapped) and incoming edges from an
+  // external/unselected source (only the target end remapped), so the clone keeps the
+  // same input wiring the original had. Outgoing edges to an external target are
+  // intentionally not duplicated: a target handle only ever accepts one connection, and
+  // that slot is already taken by the original's edge.
+  const edgesToClone = edges.filter((e) => idSet.has(e.target));
+  const newEdges = edgesToClone.map((e) => ({
+    ...e,
+    id: `edge_dup_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    source: idMap.get(e.source) ?? e.source,
+    target: idMap.get(e.target)!,
+    selected: false,
+  }));
+
+  set({
+    nodes: [...nodes, ...newNodes],
+    edges: [...edges, ...newEdges],
+    _dirty: true,
+  });
+}
+
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   nodes: [],
   edges: [],
   groups: [],
-  focusedGroupId: null,
   selectedNodeId: null,
   isRunning: false,
   runResults: {},
   activeNodeId: null,
   completedNodeIds: [],
+  runningGroupId: null,
+  hoveredRunGroupId: null,
 
   workflowId: null,
   workflowName: null,
@@ -501,7 +746,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       nodes: prev.nodes,
       edges: prev.edges,
       groups: prev.groups,
-      focusedGroupId: prev.focusedGroupId,
       selectedNodeId: prev.selectedNodeId,
       past: newPast,
       future: newFuture,
@@ -523,7 +767,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       nodes: next.nodes,
       edges: next.edges,
       groups: next.groups,
-      focusedGroupId: next.focusedGroupId,
       selectedNodeId: next.selectedNodeId,
       past: newPast,
       future: newFuture,
@@ -541,17 +784,14 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     // box-select shouldn't mark the workflow dirty — otherwise the 3s autosave
     // keeps re-uploading the whole graph (incl. base64 images) every selection.
     const selectionOnly = changes.every((c) => c.type === 'select');
+    const nextNodes = applyNodeChanges(changes, get().nodes);
     set({
-      nodes: applyNodeChanges(changes, get().nodes),
+      nodes: nextNodes,
       ...(selectionOnly ? {} : { _dirty: true }),
+      ...(changes.some((c) => c.type === 'select')
+        ? { selectedNodeId: nextNodes.find((n) => n.selected)?.id ?? null }
+        : {}),
     });
-    const selectionChange = changes.find(
-      (c): c is NodeChange & { type: 'select'; id: string; selected: boolean } =>
-        c.type === 'select' && 'selected' in c && (c as any).selected
-    );
-    if (selectionChange) {
-      set({ selectedNodeId: selectionChange.id });
-    }
   },
 
   onEdgesChange: (changes) => {
@@ -603,6 +843,37 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   setSelectedNodeId: (id) => set({ selectedNodeId: id }),
 
+  clearCanvasSelection: () => {
+    const { nodes, edges, selectedNodeId } = get();
+    const anyNode = nodes.some((n) => n.selected);
+    const anyEdge = edges.some((e) => e.selected);
+    if (!anyNode && !anyEdge && selectedNodeId == null) return;
+    set({
+      nodes: anyNode ? nodes.map((n) => (n.selected ? { ...n, selected: false } : n)) : nodes,
+      edges: anyEdge ? edges.map((e) => (e.selected ? { ...e, selected: false } : e)) : edges,
+      selectedNodeId: null,
+    });
+  },
+
+  selectOnlyNode: (id) => {
+    const { nodes, edges, selectedNodeId } = get();
+    const alreadyOnly =
+      selectedNodeId === id &&
+      nodes.every((n) => Boolean(n.selected) === (n.id === id)) &&
+      edges.every((e) => !e.selected);
+    if (alreadyOnly) return;
+    set({
+      nodes: nodes.map((n) => {
+        const selected = n.id === id;
+        return n.selected === selected ? n : { ...n, selected };
+      }),
+      edges: edges.some((e) => e.selected)
+        ? edges.map((e) => (e.selected ? { ...e, selected: false } : e))
+        : edges,
+      selectedNodeId: id,
+    });
+  },
+
   openCropEditorModal: (nodeId) => set({ cropEditorModalNodeId: nodeId, selectedNodeId: nodeId }),
 
   closeCropEditorModal: () => set({ cropEditorModalNodeId: null }),
@@ -613,7 +884,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   addNode: (type, position, dataOverrides) => {
     const def = NODE_TYPE_DEFINITIONS[type];
-    if (!def) return;
+    if (!def || def.legacy) return;
     pushUndoSnapshot(get, set);
     const id = `node_${++nodeIdCounter}_${Date.now()}`;
     const newNode: Node = {
@@ -622,7 +893,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       position,
       data: { ...def.defaults, label: def.label, bypassed: false, ...dataOverrides },
       selected: false,
-      ...(type === 'preview'
+      ...(isResizablePreviewNodeType(type)
         ? { width: DEFAULT_PREVIEW_NODE_WIDTH, height: DEFAULT_PREVIEW_NODE_HEIGHT }
         : {}),
     };
@@ -631,7 +902,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   addNodeAndConnectFromHandle: (newNodeType, position, dataOverrides, wire) => {
     const def = NODE_TYPE_DEFINITIONS[newNodeType];
-    if (!def) return;
+    if (!def || def.legacy) return;
 
     const { nodes, edges } = get();
     const originNode = nodes.find((n) => n.id === wire.originNodeId);
@@ -662,7 +933,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       const targetInputs = getNodeInputs(originNode.type!, originNode.data);
       const targetPort = targetInputs.find((p) => p.id === wire.handleId);
       if (!targetPort) return;
-      const sourceHandle = pickSourceOutputHandleId(newNodeType, targetPort.type);
+      const sourceHandle = pickSourceOutputHandleId(newNodeType, targetPort.type, newData);
       if (!sourceHandle) return;
       connection = {
         source: id,
@@ -678,7 +949,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       position,
       data: newData,
       selected: false,
-      ...(newNodeType === 'preview'
+      ...(isResizablePreviewNodeType(newNodeType)
         ? { width: DEFAULT_PREVIEW_NODE_WIDTH, height: DEFAULT_PREVIEW_NODE_HEIGHT }
         : {}),
     };
@@ -725,7 +996,8 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   updateNodeData: (nodeId, data) => {
-    const fieldKey = Object.keys(data).sort().join(',');
+    const fields = Object.keys(data);
+    const fieldKey = fields.slice().sort().join(',');
     const coalesceKey = `${nodeId}::${fieldKey}`;
     const now = Date.now();
     const sameRapidEdit =
@@ -742,12 +1014,15 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       ),
       _dirty: true,
     });
+    if (fields.some((f) => PREVIEW_BEARING_FIELDS.has(f))) {
+      schedulePreviewPersist(get, set, nodeId);
+    }
   },
 
   lockPreviewNodeSize: (nodeId) => {
     const nodes = get().nodes;
     const target = nodes.find((n) => n.id === nodeId);
-    if (!target || target.type !== 'preview') return;
+    if (!target || !isResizablePreviewNodeType(target.type)) return;
     if (target.width != null && target.height != null) return;
     const measured = (target as Node & { measured?: { width?: number; height?: number } })
       .measured;
@@ -760,7 +1035,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   toggleBypass: (nodeId) => {
-    if (get().focusedGroupId) return;
     pushUndoSnapshot(get, set);
     const nodes = get().nodes;
     set({
@@ -774,7 +1048,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   setBypassForNodeIds: (nodeIds, bypassed) => {
-    if (get().focusedGroupId) return;
     const idSet = new Set(nodeIds);
     if (idSet.size === 0) return;
     const nodes = get().nodes;
@@ -824,23 +1097,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set({ template, _dirty: true });
   },
 
-  toggleGroupFocus: (groupId) => {
-    const { groups, focusedGroupId } = get();
-    if (!groups.some((g) => g.id === groupId)) return;
-    pushUndoSnapshot(get, set);
-    if (focusedGroupId === groupId) {
-      set({ focusedGroupId: null });
-    } else {
-      set({ focusedGroupId: groupId });
-    }
-  },
-
-  clearGroupFocus: () => {
-    if (!get().focusedGroupId) return;
-    pushUndoSnapshot(get, set);
-    set({ focusedGroupId: null });
-  },
-
   deleteSelectedNodes: () => {
     const { nodes, edges, selectedNodeId } = get();
     if (!selectedNodeId) return;
@@ -871,11 +1127,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       }))
       .filter((g) => g.nodeIds.length > 0);
 
-    const { focusedGroupId } = get();
-    const focusStillValid =
-      focusedGroupId &&
-      updatedGroups.some((g) => g.id === focusedGroupId);
-
     set({
       nodes: nodes.filter((n) => !selectedNodeIds.has(n.id)),
       edges: edges.filter(
@@ -887,7 +1138,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       selectedNodeId:
         selectedNodeId && selectedNodeIds.has(selectedNodeId) ? null : selectedNodeId,
       groups: updatedGroups,
-      ...(focusStillValid ? {} : { focusedGroupId: null }),
       _dirty: true,
     });
   },
@@ -942,9 +1192,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   setIsRunning: (running) => set({ isRunning: running }),
   setRunResults: (results) => set({ runResults: results }),
+  setNodeRunResult: (id, result) =>
+    set({ runResults: { ...get().runResults, [id]: result } }),
   setActiveNodeId: (id) => set({ activeNodeId: id }),
   markNodeCompleted: (id) => set({ completedNodeIds: [...get().completedNodeIds, id] }),
   clearRunProgress: () => set({ activeNodeId: null, completedNodeIds: [] }),
+  setRunningGroupId: (id) => set({ runningGroupId: id }),
+  setHoveredRunGroupId: (id) => set({ hoveredRunGroupId: id }),
 
   getWorkflowJSON: () => {
     const { nodes, edges, workflowId } = get();
@@ -973,39 +1227,83 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   },
 
   getRunWorkflowPayload: () => {
-    const { nodes, edges, workflowId, focusedGroupId, groups } = get();
-    const baseNodes = nodes.map((n) => ({
-      id: n.id,
-      type: n.type,
-      data:
-        n.type === 'editor'
-          ? normalizeEditorDataForRun(n.data as Record<string, any>)
-          : n.data,
-      position: n.position,
-      ...(n.style ? { style: n.style } : {}),
-      ...(n.width != null ? { width: n.width } : {}),
-      ...(n.height != null ? { height: n.height } : {}),
-    }));
-    const baseEdges = edges.map((e) => ({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      sourceHandle: e.sourceHandle,
-      targetHandle: e.targetHandle,
-    }));
-    const base = {
-      nodes: baseNodes,
-      edges: baseEdges,
+    const { nodes, edges, workflowId } = get();
+    return {
+      nodes: nodes.map(toRunNodePayload),
+      edges: edges.map(toRunEdgePayload),
       workflow_id: workflowId,
     };
-    if (!focusedGroupId) return base;
-    const group = groups.find((g) => g.id === focusedGroupId);
-    if (!group) return base;
-    const ids = new Set(group.nodeIds);
+  },
+
+  getGroupRunPayload: (groupId) => {
+    const { nodes, edges, workflowId, groups } = get();
+    const group = groups.find((g) => g.id === groupId);
+    if (!group) {
+      return { nodes: [], edges: [], workflow_id: workflowId, pre_outputs: {} };
+    }
+
+    const nodeById = new Map(nodes.map((n) => [n.id, n]));
+    const incomingByTarget = new Map<string, Edge[]>();
+    for (const edge of edges) {
+      const list = incomingByTarget.get(edge.target);
+      if (list) list.push(edge);
+      else incomingByTarget.set(edge.target, [edge]);
+    }
+
+    // Nodes the backend will actually execute, and nodes whose output is
+    // already known and only needs to be handed over.
+    const execIds = new Set(group.nodeIds.filter((id) => nodeById.has(id)));
+    const preOutputs: Record<string, Record<string, any>> = {};
+
+    // Walk the whole ancestry backwards so no input into the group is left
+    // empty: an ancestor with a usable cached output is pre-seeded, and one
+    // without is pulled into the run so it produces that output for real.
+    const queue = [...execIds];
+    const walked = new Set<string>();
+    while (queue.length > 0) {
+      const nodeId = queue.shift()!;
+      if (walked.has(nodeId)) continue;
+      walked.add(nodeId);
+
+      for (const edge of incomingByTarget.get(nodeId) ?? []) {
+        const source = nodeById.get(edge.source);
+        if (!source) continue;
+        if (execIds.has(source.id)) {
+          queue.push(source.id);
+          continue;
+        }
+        const handleKey = edge.sourceHandle || 'image';
+        if (handleKey in (preOutputs[source.id] ?? {})) continue;
+
+        const value = cachedNodeOutput(source, edge.sourceHandle);
+        if (value != null && value !== '') {
+          preOutputs[source.id] = { ...preOutputs[source.id], [handleKey]: value };
+        } else {
+          // Nothing cached to stand in for this port, so the ancestor has to
+          // run. Any value already pre-seeded from it is dropped — executing
+          // produces every port itself — and its own ancestors get walked next.
+          delete preOutputs[source.id];
+          execIds.add(source.id);
+          queue.push(source.id);
+        }
+      }
+    }
+
+    const preSeededIds = Object.keys(preOutputs);
+    const includedIds = new Set([...execIds, ...preSeededIds]);
+
     return {
-      ...base,
-      nodes: baseNodes.filter((n) => ids.has(n.id)),
-      edges: baseEdges.filter((e) => ids.has(e.source) && ids.has(e.target)),
+      nodes: [
+        ...[...execIds].map((id) => toRunNodePayload(nodeById.get(id)!)),
+        // Pre-seeded ancestors ride along as bare stubs — the real value
+        // travels in pre_outputs, so the backend never executes them.
+        ...preSeededIds.map((id) => ({ id, type: nodeById.get(id)!.type, data: {} })),
+      ],
+      edges: edges
+        .filter((e) => includedIds.has(e.source) && execIds.has(e.target))
+        .map(toRunEdgePayload),
+      workflow_id: workflowId,
+      pre_outputs: preOutputs,
     };
   },
 
@@ -1018,6 +1316,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       (e) => selectedIds.has(e.source) && selectedIds.has(e.target),
     );
     duplicateSubgraphAtOffset(get, set, selectedNodes, internalEdges, 1);
+  },
+
+  duplicateNodesInPlace: (nodeIds) => {
+    leaveDuplicateBehind(get, set, nodeIds);
   },
 
   copySelectedNodes: async () => {
@@ -1087,29 +1389,24 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     };
 
     const nextGroups = [...updatedGroups, newGroup];
-    const { focusedGroupId } = get();
-    const focusStillValid =
-      focusedGroupId && nextGroups.some((g) => g.id === focusedGroupId);
 
     set({
       groups: nextGroups,
-      ...(focusStillValid ? {} : { focusedGroupId: null }),
       _dirty: true,
     });
   },
 
   ungroupNodes: (groupId) => {
-    const { groups, focusedGroupId } = get();
+    const { groups } = get();
     pushUndoSnapshot(get, set);
     set({
       groups: groups.filter((g) => g.id !== groupId),
-      ...(focusedGroupId === groupId ? { focusedGroupId: null } : {}),
       _dirty: true,
     });
   },
 
   deleteGroupNodes: (groupId) => {
-    const { nodes, edges, groups, selectedNodeId, focusedGroupId } = get();
+    const { nodes, edges, groups, selectedNodeId } = get();
     const group = groups.find((g) => g.id === groupId);
     if (!group) return;
 
@@ -1125,7 +1422,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       groups: groups.filter((g) => g.id !== groupId),
       selectedNodeId:
         selectedNodeId && nodeIdsToDelete.has(selectedNodeId) ? null : selectedNodeId,
-      ...(focusedGroupId === groupId ? { focusedGroupId: null } : {}),
       _dirty: true,
     });
   },
@@ -1169,6 +1465,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       const loadedNodes = data.nodes || [];
       const loadedEdges = dropEdgesToRemovedTargetHandles(loadedNodes, data.edges || []);
       resetUndoCoalesceState();
+      resetPreviewPersistState();
       set({
         workflowId: wf.id,
         workflowName: wf.name,
@@ -1179,7 +1476,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         edges: loadedEdges,
         groups: data.groups || [],
         template: data.template ? reconcileTemplate(data.template, loadedNodes) : null,
-        focusedGroupId: null,
         selectedNodeId: null,
         cropEditorModalNodeId: null,
         dividerEditorModalNodeId: null,
@@ -1271,6 +1567,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
 
   resetWorkflow: () => {
     resetUndoCoalesceState();
+    resetPreviewPersistState();
     set({
       workflowId: null,
       workflowName: null,
@@ -1281,7 +1578,6 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       nodes: [],
       edges: [],
       groups: [],
-      focusedGroupId: null,
       selectedNodeId: null,
       cropEditorModalNodeId: null,
       dividerEditorModalNodeId: null,

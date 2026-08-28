@@ -1,4 +1,4 @@
-"""Per-request context for workflow runs (owner + resolved Gemini key)."""
+"""Per-request context for workflow runs (owner + resolved fal.ai key)."""
 
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -7,8 +7,6 @@ from dataclasses import dataclass
 @dataclass
 class RunContext:
     owner_uid: str | None = None
-    gemini_user_key: str | None = None
-    openai_user_key: str | None = None
     fal_user_key: str | None = None
 
 

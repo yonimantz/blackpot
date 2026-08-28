@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import { useMatch, useNavigate } from 'react-router-dom';
 import { useOpenWorkflowTabsStore } from '../store/openWorkflowTabsStore';
 import { useWorkflowStore } from '../store/workflowStore';
+import Icon from '../icons/Icon';
 
 export default function WorkflowTabs() {
   const tabs = useOpenWorkflowTabsStore((s) => s.tabs);
@@ -86,7 +87,7 @@ export default function WorkflowTabs() {
                 aria-label={`Close ${tab.name}`}
                 title="Close tab"
               >
-                ×
+                <Icon name="close-line" size={11} />
               </button>
             </div>
           );

@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
 import { getConnectedImageDataUrl } from '../utils/upstreamImage';
+import { imageSrcToDataUrl } from '../utils/imageObjectUrl';
 import { API_BASE, authFetch } from '../utils/api';
+import Icon from '../icons/Icon';
 
 type RemoveBgResponse = {
   rawImage: string;
   rawMask: string;
 };
 
-const MODELS = [
-  'u2net',
-  'u2net_human_seg',
-  'isnet-general-use',
-  'birefnet-general',
-  'birefnet-portrait',
-] as const;
+/** BiRefNet v2 variants. Keep in sync with `REMOVE_BG_MODELS` in backend/nodes/tool_nodes.py. */
+const MODELS: { id: string; label: string }[] = [
+  { id: 'General Use (Heavy)', label: 'General Use — Heavy (best quality)' },
+  { id: 'General Use (Light)', label: 'General Use — Light (faster)' },
+  { id: 'General Use (Light 2K)', label: 'General Use — Light 2K' },
+  { id: 'Matting', label: 'Matting (soft edges, hair, fur)' },
+  { id: 'Portrait', label: 'Portrait (people)' },
+];
+
+const DEFAULT_MODEL = 'General Use (Heavy)';
 
 function clampInt(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(v)));
@@ -178,6 +183,60 @@ function buildOutputImageData(
   return { output: out, mask };
 }
 
+function resizeMask(
+  mask: Uint8ClampedArray<ArrayBufferLike>,
+  srcW: number,
+  srcH: number,
+  destW: number,
+  destH: number,
+): Uint8ClampedArray<ArrayBufferLike> {
+  if (srcW === destW && srcH === destH) return mask;
+  const src = document.createElement('canvas');
+  src.width = srcW;
+  src.height = srcH;
+  const sctx = src.getContext('2d');
+  if (!sctx) return mask;
+  const img = sctx.createImageData(srcW, srcH);
+  for (let i = 0; i < mask.length; i += 1) {
+    const j = i * 4;
+    const v = mask[i];
+    img.data[j] = v;
+    img.data[j + 1] = v;
+    img.data[j + 2] = v;
+    img.data[j + 3] = 255;
+  }
+  sctx.putImageData(img, 0, 0);
+
+  const dest = document.createElement('canvas');
+  dest.width = destW;
+  dest.height = destH;
+  const dctx = dest.getContext('2d');
+  if (!dctx) return mask;
+  dctx.imageSmoothingEnabled = true;
+  dctx.imageSmoothingQuality = 'high';
+  dctx.drawImage(src, 0, 0, destW, destH);
+  const out = dctx.getImageData(0, 0, destW, destH).data;
+  const result = new Uint8ClampedArray(destW * destH);
+  for (let i = 0; i < result.length; i += 1) result[i] = out[i * 4];
+  return result;
+}
+
+function formatApiError(payload: unknown, fallback: string): string {
+  if (!payload || typeof payload !== 'object') return fallback;
+  const detail = (payload as { detail?: unknown }).detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) =>
+        item && typeof item === 'object' && 'msg' in item
+          ? String((item as { msg: unknown }).msg)
+          : String(item),
+      )
+      .join('; ');
+  }
+  return fallback;
+}
+
 export default function RemoveBgModal({
   open,
   onClose,
@@ -199,11 +258,9 @@ export default function RemoveBgModal({
     [edges, nodeId, nodes],
   );
 
-  const [model, setModel] = useState('isnet-general-use');
-  const [alphaMatting, setAlphaMatting] = useState(false);
-  const [fgThreshold, setFgThreshold] = useState(240);
-  const [bgThreshold, setBgThreshold] = useState(10);
-  const [erodeSize, setErodeSize] = useState(10);
+  const [model, setModel] = useState(DEFAULT_MODEL);
+  const [operatingResolution, setOperatingResolution] = useState('1024x1024');
+  const [refineForeground, setRefineForeground] = useState(true);
   const [threshold, setThreshold] = useState(0);
   const [feather, setFeather] = useState(0);
   const [erode, setErode] = useState(0);
@@ -221,11 +278,10 @@ export default function RemoveBgModal({
 
   useEffect(() => {
     if (!open) return;
-    setModel(typeof data.model === 'string' && data.model ? data.model : 'isnet-general-use');
-    setAlphaMatting(Boolean(data.alphaMatting));
-    setFgThreshold(clampInt(Number(data.fgThreshold) || 240, 0, 255));
-    setBgThreshold(clampInt(Number(data.bgThreshold) || 10, 0, 255));
-    setErodeSize(clampInt(Number(data.erodeSize) || 10, 0, 40));
+    const saved = typeof data.model === 'string' ? data.model : '';
+    setModel(MODELS.some((m) => m.id === saved) ? saved : DEFAULT_MODEL);
+    setOperatingResolution(data.operatingResolution === '2048x2048' ? '2048x2048' : '1024x1024');
+    setRefineForeground(data.refineForeground !== false);
     setThreshold(clampInt(Number(data.threshold) || 0, 0, 255));
     setFeather(Math.max(0, Math.min(20, Number(data.feather) || 0)));
     setErode(clampInt(Number(data.erode) || 0, 0, 20));
@@ -267,37 +323,48 @@ export default function RemoveBgModal({
     setLoading(true);
     setError('');
     try {
+      // Saved imports/previews resolve to `/api/upload/{id}`, not a data URL.
+      // fal's upload path only accepts real image bytes — same as a workflow
+      // run, which reloads the file from disk inside `importImage`.
+      const imageDataUrl = await imageSrcToDataUrl(imageSrc);
+      const srcPixels = sourceImageData || (await loadImageData(imageDataUrl));
+      if (!sourceImageData) setSourceImageData(srcPixels);
+
       const res = await authFetch(`${API_BASE}/tools/remove-bg`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          imageDataUrl: imageSrc,
+          imageDataUrl,
           model,
-          alphaMatting,
-          fgThreshold,
-          bgThreshold,
-          erodeSize,
+          operatingResolution,
+          refineForeground,
         }),
       });
-      const payload = (await res.json().catch(() => null)) as RemoveBgResponse | { detail?: string } | null;
-      if (!res.ok) throw new Error((payload as { detail?: string } | null)?.detail || 'remove-bg failed');
+      const payload = (await res.json().catch(() => null)) as RemoveBgResponse | { detail?: unknown } | null;
+      if (!res.ok) throw new Error(formatApiError(payload, 'remove-bg failed'));
       if (!payload || typeof (payload as RemoveBgResponse).rawMask !== 'string') {
         throw new Error('Invalid remove-bg response');
       }
 
-      const rawImgData = await loadImageData((payload as RemoveBgResponse).rawImage);
       const rawMaskData = await loadImageData((payload as RemoveBgResponse).rawMask);
-      const mask = new Uint8ClampedArray(rawMaskData.width * rawMaskData.height);
+      let mask = new Uint8ClampedArray(rawMaskData.width * rawMaskData.height);
       for (let i = 0; i < mask.length; i += 1) mask[i] = rawMaskData.data[i * 4];
-
-      setSourceImageData(rawImgData);
+      if (rawMaskData.width !== srcPixels.width || rawMaskData.height !== srcPixels.height) {
+        mask = resizeMask(
+          mask,
+          rawMaskData.width,
+          rawMaskData.height,
+          srcPixels.width,
+          srcPixels.height,
+        );
+      }
       setRawMask(mask);
     } catch (e: any) {
       setError(e?.message || 'Failed to run background removal.');
     } finally {
       setLoading(false);
     }
-  }, [alphaMatting, bgThreshold, erodeSize, fgThreshold, imageSrc, model]);
+  }, [imageSrc, model, operatingResolution, refineForeground, sourceImageData]);
 
   const processed = useMemo(() => {
     if (!sourceImageData || !rawMask) return null;
@@ -333,10 +400,8 @@ export default function RemoveBgModal({
     updateNodeData(nodeId, {
       _removeBgBaked: baked,
       model,
-      alphaMatting,
-      fgThreshold,
-      bgThreshold,
-      erodeSize,
+      operatingResolution,
+      refineForeground,
       threshold,
       feather,
       erode,
@@ -346,16 +411,14 @@ export default function RemoveBgModal({
     });
     onClose();
   }, [
-    alphaMatting,
     bgFill,
-    bgThreshold,
     dilate,
     erode,
-    erodeSize,
     feather,
-    fgThreshold,
     invert,
     model,
+    operatingResolution,
+    refineForeground,
     nodeId,
     onClose,
     processed,
@@ -384,14 +447,15 @@ export default function RemoveBgModal({
       <div className="compositor-modal editor-modal" role="dialog" aria-labelledby="removebg-modal-title">
         <div className="compositor-modal-header">
           <h2 id="removebg-modal-title">Remove Background</h2>
-          <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close">
-            ×
+          <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close" title="Close">
+            <Icon name="close-line" size={18} />
           </button>
         </div>
         <div className="compositor-modal-body">
           <aside className="compositor-modal-sidebar">
             <p className="compositor-modal-hint">
-              Run the model once, then tweak threshold and edge controls live.
+              Run the cutout once on fal.ai, then tweak threshold and edge controls live —
+              those are local, so only the initial run costs anything.
               Click <strong>Bake</strong> to store the final transparent output on this node.
             </p>
 
@@ -403,58 +467,32 @@ export default function RemoveBgModal({
               disabled={isRunning || loading}
             >
               {MODELS.map((m) => (
-                <option key={m} value={m}>
-                  {m}
+                <option key={m.id} value={m.id}>
+                  {m.label}
                 </option>
               ))}
+            </select>
+
+            <label className="inspector-label">Detail Resolution</label>
+            <select
+              className="inspector-select"
+              value={operatingResolution}
+              onChange={(e) => setOperatingResolution(e.target.value)}
+              disabled={isRunning || loading}
+            >
+              <option value="1024x1024">1024 — faster</option>
+              <option value="2048x2048">2048 — finer edges, slower</option>
             </select>
 
             <label className="inspector-label" style={{ marginTop: 8 }}>
               <input
                 type="checkbox"
-                checked={alphaMatting}
-                onChange={(e) => setAlphaMatting(e.target.checked)}
+                checked={refineForeground}
+                onChange={(e) => setRefineForeground(e.target.checked)}
                 disabled={isRunning || loading}
               />
-              Alpha matting
+              Refine foreground
             </label>
-
-            {alphaMatting ? (
-              <>
-                <label className="inspector-label">Foreground Threshold ({fgThreshold})</label>
-                <input
-                  className="inspector-range"
-                  type="range"
-                  min={0}
-                  max={255}
-                  value={fgThreshold}
-                  onChange={(e) => setFgThreshold(clampInt(Number(e.target.value), 0, 255))}
-                  disabled={isRunning || loading}
-                />
-
-                <label className="inspector-label">Background Threshold ({bgThreshold})</label>
-                <input
-                  className="inspector-range"
-                  type="range"
-                  min={0}
-                  max={255}
-                  value={bgThreshold}
-                  onChange={(e) => setBgThreshold(clampInt(Number(e.target.value), 0, 255))}
-                  disabled={isRunning || loading}
-                />
-
-                <label className="inspector-label">Alpha Erode Size ({erodeSize})</label>
-                <input
-                  className="inspector-range"
-                  type="range"
-                  min={0}
-                  max={40}
-                  value={erodeSize}
-                  onChange={(e) => setErodeSize(clampInt(Number(e.target.value), 0, 40))}
-                  disabled={isRunning || loading}
-                />
-              </>
-            ) : null}
 
             <button
               type="button"

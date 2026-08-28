@@ -1,77 +1,29 @@
-import { useRef } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
-import { runWorkflowStreaming, cancelWorkflow } from '../utils/api';
-import { applyNodeResult, formatWorkflowRunErrors } from '../utils/applyRunResult';
-
-const streamingResults: Record<string, any> = {};
+import { startWorkflowRun, stopWorkflowRun } from '../utils/runWorkflow';
+import Icon from '../icons/Icon';
 
 export default function RunButton() {
-  const {
-    isRunning,
-    setIsRunning,
-    setRunResults,
-    getRunWorkflowPayload,
-    setActiveNodeId,
-    clearRunProgress,
-  } = useWorkflowStore();
-  const abortRef = useRef<AbortController | null>(null);
+  const isRunning = useWorkflowStore((s) => s.isRunning);
+  const getRunWorkflowPayload = useWorkflowStore((s) => s.getRunWorkflowPayload);
 
   const handleRun = async () => {
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setIsRunning(true);
-    clearRunProgress();
-    for (const key of Object.keys(streamingResults)) delete streamingResults[key];
-
-    try {
-      const workflow = getRunWorkflowPayload();
-      const doneResults = await runWorkflowStreaming(
-        workflow,
-        {
-          onNodeStart: (nodeId) => {
-            useWorkflowStore.getState().setActiveNodeId(nodeId);
-          },
-          onNodeDone: (nodeId, result) => {
-            useWorkflowStore.getState().markNodeCompleted(nodeId);
-            if (result) applyNodeResult(nodeId, result, streamingResults);
-          },
-        },
-        controller.signal,
-      );
-
-      const mergedResults = { ...streamingResults, ...doneResults };
-
-      setActiveNodeId(null);
-      setRunResults(mergedResults);
-
-      const errors = formatWorkflowRunErrors(mergedResults);
-      if (errors.length > 0) {
-        alert(`Workflow errors:\n\n${errors.join('\n\n')}`);
-      }
-    } catch (err: any) {
-      if (err.name === 'AbortError') return;
-      alert('Workflow error: ' + (err.message || 'Unknown error'));
-    } finally {
-      abortRef.current = null;
-      setIsRunning(false);
-      clearRunProgress();
-    }
+    const workflow = getRunWorkflowPayload();
+    await startWorkflowRun(workflow);
   };
 
   const handleStop = async () => {
-    await cancelWorkflow();
-    abortRef.current?.abort();
+    await stopWorkflowRun();
   };
 
   return (
     <div className="run-bar">
       {isRunning ? (
         <button className="run-button stop" onClick={handleStop}>
-          ■ STOP
+          <Icon name="stop-fill" size={14} /> STOP
         </button>
       ) : (
         <button className="run-button" onClick={handleRun}>
-          ▶ RUN WORKFLOW
+          <Icon name="play-fill" size={14} /> RUN WORKFLOW
         </button>
       )}
     </div>

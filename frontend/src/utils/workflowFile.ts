@@ -10,6 +10,7 @@
 
 import type { WorkflowFull } from './api';
 import { getUploadFileUrl } from './api';
+import { withoutPreviewAssetRefs } from './previewAssets';
 import {
   DEFAULT_WORKFLOW_ICON_COLOR,
   DEFAULT_WORKFLOW_ICON_ID,
@@ -80,25 +81,30 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 /**
- * Re-inline externalized images (`fileAssetId`) back into `fileData` so the
- * exported `.blpw` is fully self-contained and portable to another machine /
- * install where the asset files don't exist.
+ * Make nodes portable: re-inline externalized images (`fileAssetId`) back into
+ * `fileData` so the exported `.blpw` is self-contained on a machine where the
+ * asset files don't exist, and drop saved-preview references, which point at
+ * this install's file store and would only resolve to broken images elsewhere.
+ * Previews are regenerable, so the importing machine rebuilds them on its first
+ * bake or run.
  */
-async function inlineAssetsForExport(nodes: unknown[]): Promise<unknown[]> {
+async function prepareNodesForExport(nodes: unknown[]): Promise<unknown[]> {
   return Promise.all(
     nodes.map(async (n) => {
       if (!isObj(n)) return n;
-      const d = n.data;
-      if (!isObj(d)) return n;
+      if (!isObj(n.data)) return n;
+      const d = withoutPreviewAssetRefs(n.data);
       const assetId = d.fileAssetId;
-      if (typeof assetId !== 'string' || !assetId || d.fileData) return n;
+      if (typeof assetId !== 'string' || !assetId || d.fileData) {
+        return { ...n, data: d };
+      }
       try {
         const res = await fetch(getUploadFileUrl(assetId));
-        if (!res.ok) return n;
+        if (!res.ok) return { ...n, data: d };
         const dataUrl = await blobToDataUrl(await res.blob());
         return { ...n, data: { ...d, fileData: dataUrl, fileAssetId: '' } };
       } catch {
-        return n;
+        return { ...n, data: d };
       }
     }),
   );
@@ -106,7 +112,7 @@ async function inlineAssetsForExport(nodes: unknown[]): Promise<unknown[]> {
 
 /** Build the export payload, then download it as `<name>.blpw`. */
 export async function exportWorkflowToFile(wf: WorkflowFull): Promise<void> {
-  const nodes = await inlineAssetsForExport(wf.data?.nodes ?? []);
+  const nodes = await prepareNodesForExport(wf.data?.nodes ?? []);
   const payload: BlpwFile = {
     format: BLPW_FORMAT_TAG,
     version: BLPW_FORMAT_VERSION,

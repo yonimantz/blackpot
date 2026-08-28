@@ -5,6 +5,7 @@ import {
   applyKeyColor,
   type KeyColorSettings,
 } from '../utils/keyColor';
+import Icon from '../icons/Icon';
 
 type BrushMode = 'keep' | 'remove';
 type ToolMode = 'brush' | 'pick';
@@ -476,8 +477,9 @@ export default function KeyColorModal({
             className="compositor-modal-close"
             onClick={handleCancel}
             aria-label="Close"
+            title="Close"
           >
-            ×
+            <Icon name="close-line" size={18} />
           </button>
         </div>
         <div className="compositor-modal-body">

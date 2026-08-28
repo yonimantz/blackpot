@@ -139,3 +139,19 @@ export async function imageSrcToBlob(src: string, fallbackFilename: string): Pro
   const mime = mimeFromFilename(fallbackFilename) || 'image/png';
   return new Blob([await blob.arrayBuffer()], { type: mime });
 }
+
+/**
+ * Turn any preview src (data URL, `/api/upload/{id}`, remote URL) into a
+ * `data:` URL the backend can decode. Saved images now live in the file store
+ * and resolve to HTTP paths; fal upload still needs the actual bytes.
+ */
+export async function imageSrcToDataUrl(src: string): Promise<string> {
+  if (src.startsWith('data:')) return src;
+  const blob = await imageSrcToBlob(src, 'image.png');
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Could not encode image'));
+    reader.readAsDataURL(blob);
+  });
+}

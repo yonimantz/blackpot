@@ -64,6 +64,13 @@ DB_PATH = os.path.join(DATA_DIR, 'spoton.db')
 COLLECTION_DIR = os.path.join(DATA_DIR, 'collection')
 UPLOAD_DIR = os.path.join(DATA_DIR, 'uploads')
 EXPORT_DIR = os.path.join(DATA_DIR, 'exports')
+MODELS_DIR = os.path.join(DATA_DIR, 'models')
+
+# Pre-upgrade database snapshots (see database.py::backup_database). Just the
+# database, not collection/uploads: those are hundreds of MB and a migration
+# never touches them, so backing them up on every upgrade would be slow and
+# protect nothing.
+BACKUP_DIR = os.path.join(DATA_DIR, 'backups')
 
 # Optional key file for an installed copy, which has no .env beside the code.
 ENV_FILE = os.path.join(DATA_DIR, '.env')
@@ -121,7 +128,7 @@ def _prepare() -> None:
             # A failed migration must not stop the app from starting; the worst
             # case is that the old data stays put and the app starts empty.
             pass
-    for directory in (COLLECTION_DIR, UPLOAD_DIR, EXPORT_DIR):
+    for directory in (COLLECTION_DIR, UPLOAD_DIR, EXPORT_DIR, MODELS_DIR, BACKUP_DIR):
         os.makedirs(directory, exist_ok=True)
 
 

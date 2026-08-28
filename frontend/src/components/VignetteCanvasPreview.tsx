@@ -1,34 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
-import { getUploadFileUrl } from '../utils/api';
+import { getConnectedImageDataUrl } from '../utils/upstreamImage';
 import {
   applyVignetteLayersToRgba,
   type VignetteLayerData,
 } from '../utils/vignetteMath';
-
-function getConnectedImageSrc(
-  nodeId: string,
-  edges: { source: string; target: string; targetHandle?: string | null }[],
-  allNodes: { id: string; data?: Record<string, any> }[],
-): string | null {
-  const edge = edges.find((e) => e.target === nodeId && e.targetHandle === 'image');
-  if (!edge) return null;
-  const sourceNode = allNodes.find((n) => n.id === edge.source);
-  if (!sourceNode) return null;
-  const d = sourceNode.data;
-  if (typeof d?.fileAssetId === 'string' && d.fileAssetId) {
-    return getUploadFileUrl(d.fileAssetId);
-  }
-  return (
-    d?.fileData ||
-    d?._result?.image ||
-    d?.previewData ||
-    d?._editorPreview ||
-    d?._compositorPreview ||
-    d?._vignettePreview ||
-    null
-  );
-}
 
 function normalizeLayers(raw: unknown): VignetteLayerData[] {
   if (!Array.isArray(raw)) return [];
@@ -72,7 +48,7 @@ export default function VignetteCanvasPreview({
   const allNodes = useWorkflowStore((s) => s.nodes);
   const [baseImg, setBaseImg] = useState<HTMLImageElement | null>(null);
 
-  const src = getConnectedImageSrc(nodeId, edges, allNodes);
+  const src = getConnectedImageDataUrl(nodeId, 'image', edges, allNodes);
   const layers = useMemo(() => {
     if (layersForPreview !== undefined) return layersForPreview;
     return normalizeLayers(data.vignetteLayers);
@@ -118,7 +94,7 @@ export default function VignetteCanvasPreview({
         ctx.fillStyle = '#1e1e21';
         ctx.fillRect(0, 0, ew, eh);
         ctx.fillStyle = '#71717a';
-        ctx.font = '12px Inter, sans-serif';
+        ctx.font = '12px Fredoka, sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText('Connect an image input', ew / 2, eh / 2 + 4);
         return;

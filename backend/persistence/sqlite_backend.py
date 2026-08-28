@@ -1,7 +1,22 @@
-import os
 from typing import Any
 
 import database as db
+
+_MIME_BY_EXT = {
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'webp': 'image/webp',
+    'glb': 'model/gltf-binary',
+}
+
+
+def _read_with_mime(path: str | None) -> tuple[bytes, str] | None:
+    if not path:
+        return None
+    with open(path, 'rb') as f:
+        raw = f.read()
+    ext = path.rsplit('.', 1)[-1].lower()
+    return raw, _MIME_BY_EXT.get(ext, 'image/png')
 
 
 class SqliteBackend:
@@ -62,6 +77,9 @@ class SqliteBackend:
         workflow_id: str | None,
         width: int | None,
         height: int | None,
+        prompt: str | None = None,
+        seed: int | None = None,
+        model: str | None = None,
     ) -> dict:
         ouid = None if owner_uid == db.LEGACY_OWNER_SENTINEL else owner_uid
         return db.add_to_collection(
@@ -71,24 +89,46 @@ class SqliteBackend:
             width=width,
             height=height,
             owner_uid=ouid,
+            prompt=prompt,
+            seed=seed,
+            model=model,
+        )
+
+    def add_model_to_collection(
+        self,
+        owner_uid: str,
+        model_bytes: bytes,
+        ext: str = 'glb',
+        thumb_bytes: bytes | None = None,
+        thumb_ext: str = 'png',
+        workflow_id: str | None = None,
+        prompt: str | None = None,
+        seed: int | None = None,
+        model: str | None = None,
+    ) -> dict:
+        ouid = None if owner_uid == db.LEGACY_OWNER_SENTINEL else owner_uid
+        return db.add_model_to_collection(
+            model_bytes,
+            ext=ext,
+            thumb_bytes=thumb_bytes,
+            thumb_ext=thumb_ext,
+            workflow_id=workflow_id,
+            owner_uid=ouid,
+            prompt=prompt,
+            seed=seed,
+            model=model,
         )
 
     def delete_collection_item(self, owner_uid: str, img_id: str) -> bool:
         return db.delete_collection_item(img_id, owner_uid)
 
     def get_collection_bytes(self, owner_uid: str, img_id: str) -> tuple[bytes, str] | None:
-        path = db.get_collection_filepath(img_id, owner_uid)
-        if not path:
-            return None
-        with open(path, 'rb') as f:
-            raw = f.read()
-        ext = path.rsplit('.', 1)[-1].lower()
-        mime = 'image/png'
-        if ext in ('jpg', 'jpeg'):
-            mime = 'image/jpeg'
-        elif ext == 'webp':
-            mime = 'image/webp'
-        return raw, mime
+        return _read_with_mime(db.get_collection_filepath(img_id, owner_uid))
+
+    def get_collection_thumb_bytes(
+        self, owner_uid: str, img_id: str
+    ) -> tuple[bytes, str] | None:
+        return _read_with_mime(db.get_collection_thumb_filepath(img_id, owner_uid))
 
     def get_collection_folder(self, owner_uid: str, folder_id: str) -> dict | None:
         return db.get_collection_folder(folder_id, owner_uid)
@@ -112,36 +152,6 @@ class SqliteBackend:
         self, owner_uid: str, img_ids: list[str], folder_id: str | None
     ) -> bool:
         return db.set_collection_items_folder(img_ids, folder_id, owner_uid)
-
-    def get_user_gemini_key(self, owner_uid: str) -> str | None:
-        if owner_uid == db.LEGACY_OWNER_SENTINEL:
-            return None
-        return db.get_user_gemini_key_sqlite(owner_uid)
-
-    def set_user_gemini_key(self, owner_uid: str, api_key: str) -> None:
-        if owner_uid == db.LEGACY_OWNER_SENTINEL:
-            raise ValueError('Cannot store API key without a signed-in user')
-        db.set_user_gemini_key_sqlite(owner_uid, api_key)
-
-    def clear_user_gemini_key(self, owner_uid: str) -> None:
-        if owner_uid == db.LEGACY_OWNER_SENTINEL:
-            return
-        db.clear_user_gemini_key_sqlite(owner_uid)
-
-    def get_user_openai_key(self, owner_uid: str) -> str | None:
-        if owner_uid == db.LEGACY_OWNER_SENTINEL:
-            return None
-        return db.get_user_openai_key_sqlite(owner_uid)
-
-    def set_user_openai_key(self, owner_uid: str, api_key: str) -> None:
-        if owner_uid == db.LEGACY_OWNER_SENTINEL:
-            raise ValueError('Cannot store API key without a signed-in user')
-        db.set_user_openai_key_sqlite(owner_uid, api_key)
-
-    def clear_user_openai_key(self, owner_uid: str) -> None:
-        if owner_uid == db.LEGACY_OWNER_SENTINEL:
-            return
-        db.clear_user_openai_key_sqlite(owner_uid)
 
     def get_user_fal_key(self, owner_uid: str) -> str | None:
         if owner_uid == db.LEGACY_OWNER_SENTINEL:

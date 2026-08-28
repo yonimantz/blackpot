@@ -3,6 +3,7 @@ import json
 import ntpath
 import os
 import base64
+import re
 import sys
 import threading
 import uuid
@@ -22,7 +23,7 @@ except ImportError:
 
 from dotenv import load_dotenv
 
-from paths import APP_NAME, BACKEND_DIR, ENV_FILE, FRONTEND_DIST, UPLOAD_DIR
+from paths import APP_NAME, BACKEND_DIR, ENV_FILE, FRONTEND_DIST, MODELS_DIR, UPLOAD_DIR
 
 # A .env beside the code only exists in a dev checkout and takes precedence; an
 # installed copy reads the one in the user's data directory. load_dotenv never
@@ -30,17 +31,23 @@ from paths import APP_NAME, BACKEND_DIR, ENV_FILE, FRONTEND_DIST, UPLOAD_DIR
 load_dotenv(os.path.join(BACKEND_DIR, '.env'))
 load_dotenv(ENV_FILE)
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 import database as db
 from engine import run_workflow, run_workflow_streaming, request_cancel
-from nodes.io_nodes import export_images
-from nodes.tool_nodes import run_remove_bg_raw
+from nodes.io_nodes import export_images, export_models, resolve_model_path
+from nodes.tool_nodes import DEFAULT_REMOVE_BG_MODEL, run_remove_bg_raw
 from persistence import get_persistence
 from request_context import RunContext, reset_run_context, set_run_context
+from version import __version__ as APP_VERSION
+
+# Upload ids starting with this belong to node previews rather than to images the
+# user imported, which is what makes them safe to garbage-collect. Must stay in
+# sync with PREVIEW_ASSET_KEY_PREFIX in frontend/src/utils/previewAssets.ts.
+PREVIEW_UPLOAD_PREFIX = 'pv-'
 
 
 @asynccontextmanager
@@ -49,6 +56,13 @@ async def lifespan(_app: FastAPI):
     # Reclaim space from image blobs that the client migrates out of the graph.
     try:
         db.vacuum_if_bloated()
+    except Exception:
+        pass
+    # Preview assets are keyed by workflow + node, so deleting either leaves an
+    # unreferenced file behind. Nothing is mid-edit at startup, so this is the
+    # safe moment to collect them.
+    try:
+        db.sweep_orphaned_uploads(UPLOAD_DIR, PREVIEW_UPLOAD_PREFIX)
     except Exception:
         pass
     yield
@@ -79,23 +93,23 @@ class WorkflowPayload(BaseModel):
     nodes: list[dict]
     edges: list[dict]
     workflow_id: Optional[str] = None
+    # Node id -> output handle -> value. Lets the caller pre-seed outputs for
+    # nodes that won't actually run (e.g. a group run referencing an outside
+    # node's cached result) so downstream nodes still receive real inputs.
+    pre_outputs: dict[str, dict] = {}
 
 
 class RemoveBgToolPayload(BaseModel):
     imageDataUrl: str
-    model: str = 'isnet-general-use'
-    alphaMatting: bool = False
-    fgThreshold: int = 240
-    bgThreshold: int = 10
-    erodeSize: int = 10
+    model: str = DEFAULT_REMOVE_BG_MODEL
+    operatingResolution: str = '1024x1024'
+    refineForeground: bool = True
 
 
 def _run_context_for_user() -> RunContext:
     store = get_persistence()
     return RunContext(
         owner_uid=None,
-        gemini_user_key=store.get_user_gemini_key(_LOCAL_USER_ID),
-        openai_user_key=store.get_user_openai_key(_LOCAL_USER_ID),
         fal_user_key=store.get_user_fal_key(_LOCAL_USER_ID),
     )
 
@@ -186,33 +200,137 @@ async def api_export_images(payload: ExportImagesPayload):
     return result
 
 
-@app.post('/api/upload')
-async def api_upload_file(file: UploadFile = File(...)):
+class ExportModelItem(BaseModel):
+    assetId: str
+    fileName: str = 'model'
+
+
+class ExportModelsPayload(BaseModel):
+    items: list[ExportModelItem]
+    exportPath: str = ''
+
+
+@app.post('/api/export-3d')
+async def api_export_models(payload: ExportModelsPayload):
+    if not payload.items:
+        raise HTTPException(status_code=400, detail='No models to export')
+    try:
+        result = export_models(
+            [item.model_dump() for item in payload.items],
+            payload.exportPath,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f'export failed: {e}')
+    return result
+
+
+@app.get('/api/model/{asset_id}')
+async def api_get_model_file(asset_id: str):
+    path = resolve_model_path(asset_id)
+    if not path:
+        return JSONResponse(status_code=404, content={'detail': 'Model not found'})
+    return FileResponse(
+        path,
+        media_type='model/gltf-binary',
+        headers={'Cache-Control': 'max-age=31536000'},
+    )
+
+
+# Keep in sync with MAX_IMPORT_SIZE_BYTES in frontend/src/utils/model3dImport.ts.
+_MAX_MODEL_IMPORT_BYTES = 100 * 1024 * 1024
+
+
+@app.post('/api/model')
+async def api_upload_model(file: UploadFile = File(...)):
+    """Store an imported mesh as a fresh GLB in MODELS_DIR (Import 3D node).
+
+    OBJ/FBX are converted to GLB in the browser before this is called (see
+    model3dImport.ts), so this endpoint only ever accepts and serves GLB —
+    same as every generated mesh — and the rest of the pipeline
+    (`resolve_model_path`, `/api/model/{id}`, Export 3D) needs no format
+    awareness of its own.
+    """
+    ext = file.filename.rsplit('.', 1)[-1].lower() if file.filename and '.' in file.filename else ''
+    if ext != 'glb':
+        raise HTTPException(
+            status_code=400,
+            detail='Only .glb files are accepted here — convert OBJ/FBX to GLB first.',
+        )
     contents = await file.read()
-    file_id = str(uuid.uuid4())
-    ext = file.filename.split('.')[-1] if file.filename else 'png'
-    path = os.path.join(UPLOAD_DIR, f'{file_id}.{ext}')
+    if not contents:
+        raise HTTPException(status_code=400, detail='Uploaded model is empty.')
+    if len(contents) > _MAX_MODEL_IMPORT_BYTES:
+        raise HTTPException(status_code=400, detail='Model file is too large (limit 100 MB).')
+    asset_id = f'{uuid.uuid4()}.glb'
+    path = os.path.join(MODELS_DIR, asset_id)
+    with open(path, 'wb') as f:
+        f.write(contents)
+    return {'assetId': asset_id, 'sizeBytes': len(contents)}
+
+
+_UPLOAD_KEY_UNSAFE = re.compile(r'[^A-Za-z0-9_-]')
+
+
+def _safe_upload_key(key: str) -> str:
+    """Reduce a caller-supplied upload key to a filename-safe stem."""
+    return _UPLOAD_KEY_UNSAFE.sub('', key or '')[:120]
+
+
+@app.post('/api/upload')
+async def api_upload_file(file: UploadFile = File(...), key: str = Form('')):
+    """Store bytes in the file store and return the id they can be served by.
+
+    Without a `key` each upload gets a fresh uuid, which is what imported images
+    want — every import is its own asset. Preview assets pass a `key` derived
+    from the workflow and node that own them so a re-run overwrites the previous
+    file instead of orphaning it, keeping `uploads/` bounded by node count.
+    """
+    contents = await file.read()
+    ext = (file.filename.split('.')[-1] if file.filename else 'png') or 'png'
+    stem = _safe_upload_key(key)
+    if stem:
+        # Drop any previous file for this key first, so a changed extension
+        # can't leave two candidates behind for `_find_upload_path` to pick from.
+        for stale in _find_upload_paths(stem):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    else:
+        stem = str(uuid.uuid4())
+    path = os.path.join(UPLOAD_DIR, f'{stem}.{ext}')
     with open(path, 'wb') as f:
         f.write(contents)
 
+    # Keyed uploads are preview assets, read back by URL — echoing the bytes
+    # back as base64 would double the cost of every single one.
+    if key:
+        return {'fileId': stem}
     b64 = base64.b64encode(contents).decode('ascii')
     mime = file.content_type or 'image/png'
     data_url = f'data:{mime};base64,{b64}'
-    return {'fileId': file_id, 'dataUrl': data_url}
+    return {'fileId': stem, 'dataUrl': data_url}
+
+
+def _find_upload_paths(file_id: str) -> list[str]:
+    """Every uploaded file matching an id (the on-disk name is `{id}.{ext}`)."""
+    safe = os.path.basename(file_id or '')
+    if not safe:
+        return []
+    try:
+        return [
+            os.path.join(UPLOAD_DIR, fn)
+            for fn in os.listdir(UPLOAD_DIR)
+            if fn.split('.', 1)[0] == safe
+        ]
+    except FileNotFoundError:
+        return []
 
 
 def _find_upload_path(file_id: str) -> str | None:
     """Locate an uploaded file by id (the on-disk name is `{id}.{ext}`)."""
-    safe = os.path.basename(file_id or '')
-    if not safe:
-        return None
-    try:
-        for fn in os.listdir(UPLOAD_DIR):
-            if fn.split('.', 1)[0] == safe:
-                return os.path.join(UPLOAD_DIR, fn)
-    except FileNotFoundError:
-        return None
-    return None
+    found = _find_upload_paths(file_id)
+    return found[0] if found else None
 
 
 @app.get('/api/upload/{file_id}')
@@ -233,96 +351,62 @@ async def api_get_upload_file(file_id: str):
     return Response(content=raw, media_type=mime, headers={'Cache-Control': 'max-age=31536000'})
 
 
+def _tool_image_to_data_url(image_data: str) -> str:
+    """Accept a data URL or an `/api/upload/{id}` path and return bytes fal can upload.
+
+    The editor modal often sees only the file-store URL (imports and saved
+    previews). A workflow run never has this problem because `importImage`
+    reloads the file from disk before `removeBg` runs.
+    """
+    raw = (image_data or '').strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail='imageDataUrl is required')
+    if raw.startswith('data:'):
+        return raw
+    marker = '/upload/'
+    idx = raw.find(marker)
+    if idx != -1:
+        file_id = raw[idx + len(marker):].split('?', 1)[0].split('/', 1)[0]
+        path = _find_upload_path(file_id)
+        if not path or not os.path.exists(path):
+            raise HTTPException(status_code=400, detail='Upload image not found')
+        with open(path, 'rb') as f:
+            contents = f.read()
+        ext = path.rsplit('.', 1)[-1].lower() if '.' in path else 'png'
+        mime = 'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'
+        return f'data:{mime};base64,' + base64.b64encode(contents).decode('ascii')
+    return raw
+
+
 @app.post('/api/tools/remove-bg')
 async def api_tool_remove_bg(payload: RemoveBgToolPayload):
-    image_data = (payload.imageDataUrl or '').strip()
-    if not image_data:
-        raise HTTPException(status_code=400, detail='imageDataUrl is required')
+    image_data = _tool_image_to_data_url(payload.imageDataUrl)
+    # Background removal now goes to fal, so the preview needs the same key
+    # resolution a workflow run gets.
+    tok = set_run_context(_run_context_for_user())
     try:
-        return run_remove_bg_raw(
+        return await run_remove_bg_raw(
             image_data,
             {
                 'model': payload.model,
-                'alphaMatting': payload.alphaMatting,
-                'fgThreshold': payload.fgThreshold,
-                'bgThreshold': payload.bgThreshold,
-                'erodeSize': payload.erodeSize,
+                'operatingResolution': payload.operatingResolution,
+                'refineForeground': payload.refineForeground,
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f'remove-bg failed: {e}')
+    finally:
+        reset_run_context(tok)
 
 
 @app.get('/api/health')
 async def health():
     # The app name lets a second launch recognize an already-running SpotOn
-    # rather than mistaking any listener on the port for one.
-    return {'status': 'ok', 'app': APP_NAME}
-
-
-# ---------------------------------------------------------------------------
-# User settings (Gemini API key)
-# ---------------------------------------------------------------------------
-
-class GeminiKeyPayload(BaseModel):
-    apiKey: str
-
-
-@app.get('/api/user/gemini-key')
-async def api_gemini_key_status():
-    store = get_persistence()
-    k = store.get_user_gemini_key(_LOCAL_USER_ID)
-    return {'hasKey': bool(k and k.strip()), 'managedByEnv': False}
-
-
-@app.put('/api/user/gemini-key')
-async def api_set_gemini_key(payload: GeminiKeyPayload):
-    key = (payload.apiKey or '').strip()
-    if not key:
-        raise HTTPException(status_code=400, detail='apiKey is required')
-    store = get_persistence()
-    store.set_user_gemini_key(_LOCAL_USER_ID, key)
-    return {'ok': True}
-
-
-@app.delete('/api/user/gemini-key')
-async def api_clear_gemini_key():
-    store = get_persistence()
-    store.clear_user_gemini_key(_LOCAL_USER_ID)
-    return {'ok': True}
-
-
-# ---------------------------------------------------------------------------
-# User settings (OpenAI API key)
-# ---------------------------------------------------------------------------
-
-
-class OpenAIKeyPayload(BaseModel):
-    apiKey: str
-
-
-@app.get('/api/user/openai-key')
-async def api_openai_key_status():
-    store = get_persistence()
-    k = store.get_user_openai_key(_LOCAL_USER_ID)
-    return {'hasKey': bool(k and k.strip()), 'managedByEnv': False}
-
-
-@app.put('/api/user/openai-key')
-async def api_set_openai_key(payload: OpenAIKeyPayload):
-    key = (payload.apiKey or '').strip()
-    if not key:
-        raise HTTPException(status_code=400, detail='apiKey is required')
-    store = get_persistence()
-    store.set_user_openai_key(_LOCAL_USER_ID, key)
-    return {'ok': True}
-
-
-@app.delete('/api/user/openai-key')
-async def api_clear_openai_key():
-    store = get_persistence()
-    store.clear_user_openai_key(_LOCAL_USER_ID)
-    return {'ok': True}
+    # rather than mistaking any listener on the port for one. `version` is
+    # additive — older launcher code only ever read `app`.
+    return {'status': 'ok', 'app': APP_NAME, 'version': APP_VERSION}
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +421,14 @@ class FalKeyPayload(BaseModel):
 @app.get('/api/user/fal-key')
 async def api_fal_key_status():
     store = get_persistence()
-    k = store.get_user_fal_key(_LOCAL_USER_ID)
-    return {'hasKey': bool(k and k.strip()), 'managedByEnv': False}
+    stored = (store.get_user_fal_key(_LOCAL_USER_ID) or '').strip()
+    # FAL_KEY is a real fallback at execution time, so a user with only the env
+    # var set does have a working key and should not be told to enter one.
+    from_env = (os.getenv('FAL_KEY') or '').strip()
+    return {
+        'hasKey': bool(stored or from_env),
+        'managedByEnv': bool(not stored and from_env),
+    }
 
 
 @app.put('/api/user/fal-key')
@@ -537,6 +627,18 @@ async def api_get_collection_file(img_id: str):
     return Response(content=raw, media_type=mime)
 
 
+@app.get('/api/collection/{img_id}/thumb')
+async def api_get_collection_thumb(img_id: str):
+    """The item's picture for the grid. For an image that is the file itself;
+    for a mesh it's the render stored alongside the GLB."""
+    store = get_persistence()
+    blob = store.get_collection_thumb_bytes(_PERSISTENCE_OWNER, img_id)
+    if not blob:
+        return JSONResponse(status_code=404, content={'detail': 'Thumbnail not found'})
+    raw, mime = blob
+    return Response(content=raw, media_type=mime)
+
+
 # ---------------------------------------------------------------------------
 # Frontend
 #
@@ -628,6 +730,25 @@ def _open_browser_when_ready(url: str, port: int) -> None:
         time.sleep(0.2)
 
 
+def _create_single_instance_mutex() -> None:
+    """Create a named Win32 mutex so the installer's `AppMutex` setting (see
+    packaging/spoton.iss) can tell a running copy apart from one that merely
+    left locked files behind, and offer to close it before an upgrade.
+
+    Intentionally never closed: Windows releases a process's mutex handles
+    automatically on exit, including a crash, which is what a lock meant to
+    signal "still running" needs. The name must match spoton.iss exactly.
+    """
+    if sys.platform != 'win32':
+        return
+    import ctypes
+
+    try:
+        ctypes.windll.kernel32.CreateMutexW(None, False, 'SpotOn.SingleInstance')
+    except OSError:
+        pass
+
+
 def main() -> None:
     import uvicorn
 
@@ -650,6 +771,7 @@ def main() -> None:
             raise SystemExit(
                 'No built frontend found. Run "npm run build" in frontend/ first.'
             )
+        _create_single_instance_mutex()
         threading.Thread(
             target=_open_browser_when_ready, args=(url, port), daemon=True
         ).start()

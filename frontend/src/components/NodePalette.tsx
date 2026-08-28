@@ -1,6 +1,12 @@
 import { useState } from 'react';
-import { NODE_TYPE_DEFINITIONS, NODE_CATEGORIES } from '../types/nodeTypes';
+import {
+  NODE_CATEGORIES,
+  NODE_TYPE_DEFINITIONS,
+  PLACEABLE_NODE_DEFINITIONS,
+} from '../types/nodeTypes';
 import { useWorkflowStore } from '../store/workflowStore';
+import Icon from '../icons/Icon';
+import { paletteCategoryIcon } from '../constants/paletteCategoryIcons';
 
 export default function NodePalette() {
   const isRunning = useWorkflowStore((s) => s.isRunning);
@@ -14,7 +20,7 @@ export default function NodePalette() {
     ai: true,
   });
 
-  const grouped = Object.values(NODE_TYPE_DEFINITIONS).reduce(
+  const grouped = PLACEABLE_NODE_DEFINITIONS.reduce(
     (acc, def) => {
       if (!acc[def.category]) acc[def.category] = [];
       acc[def.category].push(def);
@@ -34,6 +40,7 @@ export default function NodePalette() {
       <div className="palette-header">Nodes</div>
       {Object.entries(grouped).map(([category, defs]) => {
         const cat = NODE_CATEGORIES[category];
+        const categoryIcon = paletteCategoryIcon(category);
         return (
           <div key={category} className="palette-category">
             <div
@@ -42,13 +49,22 @@ export default function NodePalette() {
                 setExpanded((e) => ({ ...e, [category]: !e[category] }))
               }
             >
-              <span
-                className="category-dot"
-                style={{ background: cat?.color }}
-              />
+              {categoryIcon ? (
+                <Icon
+                  name={categoryIcon}
+                  size={14}
+                  className="category-icon"
+                  style={{ color: cat?.color }}
+                />
+              ) : (
+                <span
+                  className="category-dot"
+                  style={{ background: cat?.color }}
+                />
+              )}
               <span className="category-label">{cat?.label || category}</span>
               <span className="category-arrow">
-                {expanded[category] ? '▾' : '▸'}
+                <Icon name={expanded[category] ? 'down-small-line' : 'right-small-line'} size={12} />
               </span>
             </div>
             {expanded[category] && (
@@ -61,7 +77,7 @@ export default function NodePalette() {
                     onDragStart={(e) => onDragStart(e, def.type)}
                     style={{ borderLeftColor: cat?.color }}
                   >
-                    {def.label}
+                    <span>{def.label}</span>
                   </div>
                 ))}
               </div>

@@ -1,7 +1,11 @@
 import base64
 import io
+import random
 import numpy as np
 from PIL import Image, ImageDraw
+
+# Keep in sync with frontend `nodeTypes.MAX_PICK_RANDOM_INPUTS`.
+MAX_PICK_RANDOM_INPUTS = 12
 
 
 def _decode_image(data: str) -> Image.Image:
@@ -81,5 +85,22 @@ def execute_read_node(node_type: str, data: dict, inputs: dict) -> dict:
             'colors': ','.join(hex_colors),
             'data': {'colors': hex_colors},
         }
+
+    elif node_type == 'pickRandom':
+        count = max(2, min(MAX_PICK_RANDOM_INPUTS, int(data.get('inputCount') or 2)))
+        candidates = [
+            (i, inputs[f'in{i}'])
+            for i in range(1, count + 1)
+            if inputs.get(f'in{i}') not in (None, '')
+        ]
+        if not candidates:
+            raise ValueError("Pick Random: no inputs connected")
+        idx, val = random.choice(candidates)
+        value_type = data.get('valueType') or 'image'
+        if value_type == 'value':
+            val = float(val)
+        elif value_type in ('text', 'color'):
+            val = str(val)
+        return {'out': val, 'pickedIndex': idx, 'pickedFrom': len(candidates)}
 
     return {}

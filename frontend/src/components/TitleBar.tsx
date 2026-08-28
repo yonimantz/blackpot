@@ -1,12 +1,14 @@
 import { useCallback, useRef, useState, useEffect } from 'react';
 import { NavLink, useMatch, useNavigate } from 'react-router-dom';
 import { useWorkflowStore } from '../store/workflowStore';
+import AboutModal from './AboutModal';
 import EditTemplateModal from './EditTemplateModal';
 import {
   pinnedInputNodes,
   pinnedOutputNodes,
   suggestPinnedNodeIds,
 } from '../types/templateTypes';
+import Icon from '../icons/Icon';
 
 export default function TitleBar() {
   const isWorkflowRoute = useMatch('/workflow/:id');
@@ -23,6 +25,7 @@ export default function TitleBar() {
   const [draft, setDraft] = useState('');
   const [descOpen, setDescOpen] = useState(false);
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const descPopoverRef = useRef<HTMLDivElement>(null);
   const descBtnRef = useRef<HTMLButtonElement>(null);
@@ -87,10 +90,14 @@ export default function TitleBar() {
       <div className="title-bar-left">
         {isWorkflowRoute ? (
           <>
-            <button className="title-bar-back" onClick={handleBack} title="Back to Projects">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="15 18 9 12 15 6" />
-              </svg>
+            <button
+              type="button"
+              className="title-bar-back icon-btn"
+              onClick={handleBack}
+              title="Back to Projects"
+              aria-label="Back to Projects"
+            >
+              <Icon name="arrow-left-line" size={18} />
             </button>
             <div className="title-bar-workflow-row">
               <div className="title-bar-workflow-actions">
@@ -98,16 +105,13 @@ export default function TitleBar() {
                   <button
                     ref={descBtnRef}
                     type="button"
-                    className="title-bar-icon-btn"
+                    className="title-bar-icon-btn icon-btn"
                     title="Workflow description"
                     aria-expanded={descOpen}
                     aria-label="Show workflow description"
                     onClick={() => setDescOpen((o) => !o)}
                   >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="12" cy="12" r="10" />
-                      <path d="M12 16v-4M12 8h.01" />
-                    </svg>
+                    <Icon name="information-line" size={16} />
                   </button>
                   {descOpen && (
                     <div ref={descPopoverRef} className="title-bar-desc-popover" role="note">
@@ -117,28 +121,13 @@ export default function TitleBar() {
                 </div>
                 <button
                   type="button"
-                  className={`title-bar-icon-btn${template ? ' has-template' : ''}`}
+                  className={`title-bar-icon-btn icon-btn${template ? ' has-template' : ''}`}
                   title={templateBtnTitle}
                   aria-label={templateBtnTitle}
                   disabled={!canOpenTemplateEditor}
                   onClick={() => setTemplateModalOpen(true)}
                 >
-                  <svg
-                    width="16"
-                    height="16"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden
-                  >
-                    <rect x="3" y="3" width="7" height="7" rx="1" />
-                    <rect x="14" y="3" width="7" height="7" rx="1" />
-                    <rect x="3" y="14" width="7" height="7" rx="1" />
-                    <path d="M14 17h7M14 14h7M14 20h7" />
-                  </svg>
+                  <Icon name="layout-grid-line" size={16} />
                 </button>
               </div>
               {renaming ? (
@@ -255,8 +244,19 @@ export default function TitleBar() {
         </NavLink>
       </nav>
 
-      <div className="title-bar-right" />
+      <div className="title-bar-right">
+        <button
+          type="button"
+          className={`title-bar-tab title-bar-about${aboutOpen ? ' active' : ''}`}
+          onClick={() => setAboutOpen(true)}
+          aria-haspopup="dialog"
+          aria-expanded={aboutOpen}
+        >
+          About
+        </button>
+      </div>
       <EditTemplateModal open={templateModalOpen} onClose={() => setTemplateModalOpen(false)} />
+      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
     </div>
   );
 }

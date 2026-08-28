@@ -1,259 +1,58 @@
-import asyncio
 import base64
-import io
 import os
+import random
+import uuid
 
-import httpx
-from PIL import Image
+from paths import MODELS_DIR
 
-# When SSL_VERIFY=false is set in the environment (e.g. corporate proxy with self-signed cert),
-# skip TLS verification for all outbound API calls.
-_SSL_VERIFY = os.getenv('SSL_VERIFY', 'true').strip().lower() not in ('false', '0', 'no')
-if not _SSL_VERIFY:
-    import ssl
-    ssl._create_default_https_context = ssl._create_unverified_context  # noqa: SLF001
+from . import fal_common
 
-try:
-    from google import genai
-    from google.genai import types
-    _HAS_GENAI = True
-except ImportError:
-    _HAS_GENAI = False
+# ---------------------------------------------------------------------------
+# Node types removed when SpotOn moved to fal.ai as its only provider.
+#
+# They stay dispatchable so a workflow saved before the migration still opens
+# and tells the user what to swap in, instead of failing silently. Keep in sync
+# with `LEGACY_NODE_TYPES` in frontend/src/types/legacyNodes.ts.
+# ---------------------------------------------------------------------------
 
-try:
-    import fal_client
-    _HAS_FAL = True
-except ImportError:
-    _HAS_FAL = False
-
-NANO_MODEL = 'gemini-3-pro-image-preview'
-NANO2_MODEL = 'gemini-3.1-flash-image-preview'
-GPT_IMAGE_2_MODEL = 'gpt-image-2'
-# gemini-2.0-flash is not available to new API users; 2.5 Flash is the current workhorse for vision→text.
-IMAGE_ANALYZER_MODEL = 'gemini-2.5-flash'
-
-# Integer upscale factors applied to API-native output (1k). "512" is handled by downscaling.
-RESOLUTION_SCALE = {
-    '1k': 1,
-    '2k': 2,
-    '4k': 4,
-}
-
-PERSON_GEN_MAP = {
-    'allow_adult': 'ALLOW_ADULT',
-    'dont_allow': 'ALLOW_NONE',
-    'allow_all': 'ALLOW_ALL',
-}
-
-ASPECT_RATIO_HINT = {
-    '1:1': 'square (1:1 aspect ratio, equal width and height)',
-    '3:4': 'portrait 3:4 aspect ratio (taller than wide)',
-    '4:3': 'landscape 4:3 aspect ratio (wider than tall)',
-    '3:2': 'landscape 3:2 classic photo aspect ratio (wider than tall)',
-    '2:3': 'portrait 2:3 aspect ratio (taller than wide)',
-    '9:16': 'tall portrait 9:16 vertical aspect ratio',
-    '16:9': 'widescreen 16:9 horizontal aspect ratio',
-    '21:9': 'ultra-wide 21:9 cinematic aspect ratio',
-}
-
-ASPECT_RATIO_HINT_EXTENDED = {
-    **ASPECT_RATIO_HINT,
-    '5:4': 'landscape 5:4 aspect ratio (slightly wider than tall)',
-    '4:5': 'portrait 4:5 aspect ratio (slightly taller than wide)',
-    '1:2': 'tall portrait 1:2 vertical aspect ratio (double height)',
-    '2:1': 'wide landscape 2:1 horizontal aspect ratio (double width)',
-    '1:8': 'extreme vertical 1:8 tower aspect ratio',
-    '8:1': 'extreme horizontal 8:1 banner aspect ratio',
-}
-
-THINKING_BUDGET = {
-    'minimal': 1024,
-    'high': 8192,
-    'dynamic': 0,
+# node type -> (old label, the FAL AI model that replaces it)
+LEGACY_NODES = {
+    'nanoBananaPro': ('Nano Banana Pro', 'Nano Banana Pro'),
+    'nanoBanana2': ('Nano Banana 2', 'Nano Banana'),
+    'nanoBanana2Free': ('Nano Banana 2 Free', 'Nano Banana'),
+    'gptImage2': ('GPT Image 2', 'FLUX.1 [dev]'),
 }
 
 
-def resolve_gemini_api_key(data: dict) -> str:
-    """Per-node apiKey overrides user key from run context, then GEMINI_API_KEY env."""
-    node_key = (data.get('apiKey', '') or '').strip()
-    if node_key:
-        return node_key
-    try:
-        from request_context import get_run_context
-        ctx = get_run_context()
-        if ctx and ctx.gemini_user_key and str(ctx.gemini_user_key).strip():
-            return str(ctx.gemini_user_key).strip()
-    except Exception:
-        pass
-    return os.getenv('GEMINI_API_KEY', '').strip()
-
-
-def resolve_openai_api_key(data: dict) -> str:
-    """Per-node apiKey overrides user key from run context, then OPENAI_API_KEY env."""
-    node_key = (data.get('apiKey', '') or '').strip()
-    if node_key:
-        return node_key
-    try:
-        from request_context import get_run_context
-        ctx = get_run_context()
-        if ctx and ctx.openai_user_key and str(ctx.openai_user_key).strip():
-            return str(ctx.openai_user_key).strip()
-    except Exception:
-        pass
-    return os.getenv('OPENAI_API_KEY', '').strip()
-
-
-def resolve_fal_api_key(data: dict) -> str:
-    """Per-node apiKey overrides user key from run context, then FAL_KEY env."""
-    node_key = (data.get('apiKey', '') or '').strip()
-    if node_key:
-        return node_key
-    try:
-        from request_context import get_run_context
-        ctx = get_run_context()
-        if ctx and ctx.fal_user_key and str(ctx.fal_user_key).strip():
-            return str(ctx.fal_user_key).strip()
-    except Exception:
-        pass
-    return os.getenv('FAL_KEY', '').strip()
-
-
-# Documented popular `size` values for gpt-image-2 (OpenAI image generation guide).
-# The API also accepts other WxH strings within constraints (16px steps, ratio ≤3:1, etc.).
-GPT_IMAGE_2_POPULAR_SIZES = frozenset({
-    'auto',
-    '1024x1024',
-    '1536x1024',
-    '1024x1536',
-    '2048x2048',
-    '2048x1152',
-    '3840x2160',
-    '2160x3840',
-})
-
-# Legacy nodes stored `aspectRatio` only — map to closest documented preset or auto.
-GPT_IMAGE_2_LEGACY_ASPECT_TO_SIZE = {
-    '1:1': '1024x1024',
-    '3:4': '1024x1536',
-    '4:3': '1536x1024',
-    '3:2': '1536x1024',
-    '2:3': '1024x1536',
-    '9:16': '1024x1536',
-    '16:9': '2048x1152',
-    '21:9': 'auto',
-    '5:4': '1536x1024',
-    '4:5': '1024x1536',
-    '1:2': '1024x1536',
-    '2:1': '1536x1024',
-    # Long:short must be ≤ 3:1 — these presets cannot be expressed; let the API pick.
-    '1:8': 'auto',
-    '8:1': 'auto',
-}
-
-
-def _gpt_image_2_resolve_size(data: dict) -> str:
-    raw = (data.get('imageSize') or '').strip()
-    if raw in GPT_IMAGE_2_POPULAR_SIZES:
-        return raw
-    legacy = (data.get('aspectRatio') or '').strip()
-    return GPT_IMAGE_2_LEGACY_ASPECT_TO_SIZE.get(legacy, 'auto')
-
-
-# Image *edits* endpoint documents a smaller `size` enum than generations for GPT Image.
-GPT_IMAGE_2_EDITS_ALLOWED_SIZES = frozenset({
-    'auto',
-    '1024x1024',
-    '1536x1024',
-    '1024x1536',
-})
-
-
-def _gpt_image_2_edits_size(resolved: str) -> str:
-    if resolved in GPT_IMAGE_2_EDITS_ALLOWED_SIZES:
-        return resolved
-    return 'auto'
-
-
-def _gpt_image_2_decode_response_image(payload: dict) -> tuple[bytes | None, dict | None]:
-    """Parse OpenAI images JSON; return (bytes, None) or (None, error_dict)."""
-    data_arr = payload.get('data') or []
-    if not data_arr:
-        return None, {'error': 'GPT Image 2: API returned no image data.'}
-    item = data_arr[0]
-    if not isinstance(item, dict):
-        return None, {'error': 'GPT Image 2: unexpected response shape.'}
-    b64 = item.get('b64_json')
-    if not b64:
-        return None, {'error': 'GPT Image 2: response missing b64_json.'}
-    try:
-        return base64.b64decode(b64), None
-    except Exception:
-        return None, {'error': 'GPT Image 2: could not decode image bytes.'}
-
-
-def _is_gemini_api_key_auth_error(err_msg: str) -> bool:
-    """True when Google indicates the API key is missing/invalid (various message shapes)."""
-    u = err_msg.upper()
+def legacy_node_error(node_type: str) -> str:
+    label, model = LEGACY_NODES[node_type]
     return (
-        'API_KEY_INVALID' in u
-        or 'API KEY NOT VALID' in u
-        or 'INVALID API KEY' in u
-        or 'API_KEY' in u
-        or '401' in err_msg
-        or '403' in err_msg
+        f'"{label}" was removed when SpotOn moved to fal.ai only. '
+        f'Replace it with a FAL AI node set to "{model}".'
     )
 
 
-def _strip_data_url(data_url: str) -> str:
-    """Return raw base64 from a data-URL or pass through if already raw."""
-    if ',' in data_url:
-        return data_url.split(',', 1)[1]
-    return data_url
+def _resolve_seed(data: dict) -> int:
+    """Use the node seed when set; otherwise pick one so every image is reproducible."""
+    try:
+        seed_val = int(data.get('seed', 0) or 0)
+    except (TypeError, ValueError):
+        seed_val = 0
+    if seed_val <= 0:
+        seed_val = random.randint(1, 2**31 - 1)
+    return seed_val
 
 
-def _downscale_max_long_edge(img_bytes: bytes, max_px: int, mime: str) -> bytes:
-    """Shrink so the longest side is at most max_px (aspect ratio preserved)."""
-    img = Image.open(io.BytesIO(img_bytes))
-    w, h = img.size
-    long_edge = max(w, h)
-    if long_edge <= max_px:
-        return img_bytes
-    scale_f = max_px / long_edge
-    new_w = max(1, int(round(w * scale_f)))
-    new_h = max(1, int(round(h * scale_f)))
-    img = img.resize((new_w, new_h), Image.LANCZOS)
-    buf = io.BytesIO()
-    fmt = 'PNG' if 'png' in mime else 'JPEG'
-    img.save(buf, format=fmt)
-    return buf.getvalue()
+def _gen_meta(prompt: str, seed: int | None, model: str) -> dict:
+    return {'prompt': prompt, 'seed': seed, 'model': model}
 
 
-def _upscale_image(img_bytes: bytes, scale: int, mime: str) -> bytes:
-    """Upscale image by integer factor using Lanczos resampling."""
-    if scale <= 1:
-        return img_bytes
-    img = Image.open(io.BytesIO(img_bytes))
-    new_size = (img.width * scale, img.height * scale)
-    img = img.resize(new_size, Image.LANCZOS)
-    buf = io.BytesIO()
-    fmt = 'PNG' if 'png' in mime else 'JPEG'
-    img.save(buf, format=fmt)
-    return buf.getvalue()
+def _image_result(data_url: str, prompt: str, seed: int | None, model: str) -> dict:
+    return {
+        'image': data_url,
+        '_meta': _gen_meta(prompt, seed, model),
+    }
 
-
-def _apply_resolution_output(img_bytes: bytes, resolution: str, mime: str) -> bytes:
-    """512 = downscale prototype; 1k = native; 2k/4k = upscale from native."""
-    if resolution == '512':
-        img_bytes = _downscale_max_long_edge(img_bytes, 512, mime)
-    scale = RESOLUTION_SCALE.get(resolution, 1)
-    if scale > 1:
-        img_bytes = _upscale_image(img_bytes, scale, mime)
-    return img_bytes
-
-
-# ---------------------------------------------------------------------------
-# Nano Banana Pro  —  Gemini 3 Pro Image via google-genai SDK
-# ---------------------------------------------------------------------------
 
 def _collect_reference_images(inputs: dict) -> list[str]:
     """Gather base64 strings from reference image input ports (dynamic count)."""
@@ -262,261 +61,21 @@ def _collect_reference_images(inputs: dict) -> list[str]:
     while True:
         img = inputs.get(f'referenceImage{i}')
         if img:
-            refs.append(_strip_data_url(img))
+            refs.append(fal_common.strip_data_url(img))
             i += 1
         else:
             break
     return refs
 
 
-# OpenAI image *edits* accepts multiple files; docs show several inputs — cap for stability.
-GPT_IMAGE_2_MAX_REFERENCE_IMAGES = 8
-
-
-def _collect_gpt_image_2_reference_files(inputs: dict) -> list[tuple[bytes, str]]:
-    """Decode reference image ports to (bytes, mime_type) for multipart edits."""
-    out: list[tuple[bytes, str]] = []
-    i = 1
-    while True:
-        raw = inputs.get(f'referenceImage{i}')
-        if not raw:
-            break
-        s = str(raw).strip()
-        mime = 'image/png'
-        try:
-            if s.startswith('data:'):
-                head, b64part = s.split(',', 1)
-                if ';' in head:
-                    mime = head[5:].split(';')[0].strip() or mime
-                out.append((base64.b64decode(b64part), mime))
-            else:
-                out.append((base64.b64decode(_strip_data_url(s)), mime))
-        except Exception as e:
-            raise ValueError(
-                f'GPT Image 2: could not decode reference image {i}.'
-            ) from e
-        i += 1
-    return out
-
-
-async def _execute_nano_banana_pro(data: dict, inputs: dict) -> dict:
-    if not _HAS_GENAI:
-        raise ValueError(
-            "Nano Banana Pro: google-genai package is not installed. "
-            "Run: pip install -U google-genai"
-        )
-
-    api_key = resolve_gemini_api_key(data)
-    if not api_key:
-        raise ValueError(
-            "Nano Banana Pro: no API key configured. "
-            "Add your key in Settings, set GEMINI_API_KEY in backend/.env, or set apiKey on the node."
-        )
-
-    prompt = inputs.get('prompt') or data.get('prompt', '')
-    if not prompt:
-        raise ValueError("Nano Banana Pro: no prompt provided")
-
-    aspect_ratio = data.get('aspectRatio', '1:1')
-    resolution = data.get('resolution', '1k')
-    output_mime = data.get('outputMimeType', 'image/png')
-    seed_val = int(data.get('seed', 0))
-
-    ref_images = _collect_reference_images(inputs)
-
-    client = genai.Client(api_key=api_key)
-
-    image_config = types.ImageConfig(
-        aspect_ratio=aspect_ratio,
-    )
-
-    config_kwargs: dict = {
-        'response_modalities': ['IMAGE'],
-        'image_config': image_config,
-    }
-    if seed_val > 0:
-        config_kwargs['seed'] = seed_val
-
-    gen_config = types.GenerateContentConfig(**config_kwargs)
-
-    ratio_hint = ASPECT_RATIO_HINT.get(aspect_ratio, f'{aspect_ratio} aspect ratio')
-    augmented_prompt = f"{prompt}\n\n[Generate this image in {ratio_hint}.]"
-
-    contents: list = []
-    if ref_images:
-        for ref_b64 in ref_images:
-            raw_bytes = base64.b64decode(ref_b64)
-            contents.append(
-                types.Part.from_bytes(data=raw_bytes, mime_type='image/png')
-            )
-    contents.append(augmented_prompt)
-
-    def _sync_generate():
-        return client.models.generate_content(
-            model=NANO_MODEL,
-            contents=contents,
-            config=gen_config,
-        )
-
-    try:
-        response = await asyncio.to_thread(_sync_generate)
-    except Exception as e:
-        err_msg = str(e)
-        if _is_gemini_api_key_auth_error(err_msg):
-            return {'error': f'Nano Banana Pro: Invalid or expired API key. Check your Gemini API key. ({err_msg})'}
-        if 'not found' in err_msg.lower() or '404' in err_msg:
-            return {'error': f'Nano Banana Pro: Model "{NANO_MODEL}" not found. You may need access or a different model name. ({err_msg})'}
-        return {'error': f'Nano Banana Pro: API call failed — {err_msg}'}
-
-    candidates = getattr(response, 'candidates', None)
-    if not candidates:
-        block_reason = getattr(response, 'prompt_feedback', None)
-        extra = f' (block reason: {block_reason})' if block_reason else ''
-        return {'error': f'Nano Banana Pro: API returned no candidates.{extra}'}
-
-    parts = candidates[0].content.parts if candidates[0].content else []
-    if not parts:
-        return {'error': 'Nano Banana Pro: response contained no parts'}
-
-    for part in parts:
-        inline = getattr(part, 'inline_data', None)
-        if inline and inline.data:
-            img_bytes = inline.data
-            mime = getattr(inline, 'mime_type', None) or output_mime
-
-            if isinstance(img_bytes, str):
-                img_bytes = base64.b64decode(img_bytes)
-
-            img_bytes = _apply_resolution_output(img_bytes, resolution, mime)
-
-            b64 = base64.b64encode(img_bytes).decode('ascii')
-            return {'image': f'data:{mime};base64,{b64}'}
-
-    return {'error': 'Nano Banana Pro: response contained no image data'}
-
-
 # ---------------------------------------------------------------------------
-# Nano Banana 2  —  Gemini 3.1 Flash Image via google-genai SDK
+# Image SCF Prompt  —  image to prompt, via a vision LLM on fal
 # ---------------------------------------------------------------------------
 
-async def _execute_nano_banana_2(data: dict, inputs: dict) -> dict:
-    if not _HAS_GENAI:
-        raise ValueError(
-            "Nano Banana 2: google-genai package is not installed. "
-            "Run: pip install -U google-genai"
-        )
-
-    api_key = resolve_gemini_api_key(data)
-    if not api_key:
-        raise ValueError(
-            "Nano Banana 2: no API key configured. "
-            "Add your key in Settings, set GEMINI_API_KEY in backend/.env, or set apiKey on the node."
-        )
-
-    prompt = inputs.get('prompt') or data.get('prompt', '')
-    if not prompt:
-        raise ValueError("Nano Banana 2: no prompt provided")
-
-    aspect_ratio = data.get('aspectRatio', '1:1')
-    resolution = data.get('resolution', '1k')
-    output_mime = data.get('outputMimeType', 'image/png')
-    seed_val = int(data.get('seed', 0))
-    thinking_mode = data.get('thinkingMode', 'off')
-
-    ref_images = _collect_reference_images(inputs)
-
-    client = genai.Client(api_key=api_key)
-
-    image_config = types.ImageConfig(
-        aspect_ratio=aspect_ratio,
-    )
-
-    config_kwargs: dict = {
-        'response_modalities': ['IMAGE'],
-        'image_config': image_config,
-    }
-    if seed_val > 0:
-        config_kwargs['seed'] = seed_val
-
-    if thinking_mode != 'off' and thinking_mode in THINKING_BUDGET:
-        budget = THINKING_BUDGET[thinking_mode]
-        if budget > 0:
-            config_kwargs['thinking_config'] = types.ThinkingConfig(
-                thinking_budget=budget,
-            )
-        else:
-            config_kwargs['thinking_config'] = types.ThinkingConfig()
-
-    gen_config = types.GenerateContentConfig(**config_kwargs)
-
-    ratio_hint = ASPECT_RATIO_HINT_EXTENDED.get(aspect_ratio, f'{aspect_ratio} aspect ratio')
-    augmented_prompt = f"{prompt}\n\n[Generate this image in {ratio_hint}.]"
-
-    contents: list = []
-    if ref_images:
-        for ref_b64 in ref_images:
-            raw_bytes = base64.b64decode(ref_b64)
-            contents.append(
-                types.Part.from_bytes(data=raw_bytes, mime_type='image/png')
-            )
-    contents.append(augmented_prompt)
-
-    def _sync_generate():
-        return client.models.generate_content(
-            model=NANO2_MODEL,
-            contents=contents,
-            config=gen_config,
-        )
-
-    try:
-        response = await asyncio.to_thread(_sync_generate)
-    except Exception as e:
-        err_msg = str(e)
-        if _is_gemini_api_key_auth_error(err_msg):
-            return {'error': f'Nano Banana 2: Invalid or expired API key. Check your Gemini API key. ({err_msg})'}
-        if 'not found' in err_msg.lower() or '404' in err_msg:
-            return {'error': f'Nano Banana 2: Model "{NANO2_MODEL}" not found. You may need access or a different model name. ({err_msg})'}
-        return {'error': f'Nano Banana 2: API call failed — {err_msg}'}
-
-    candidates = getattr(response, 'candidates', None)
-    if not candidates:
-        block_reason = getattr(response, 'prompt_feedback', None)
-        extra = f' (block reason: {block_reason})' if block_reason else ''
-        return {'error': f'Nano Banana 2: API returned no candidates.{extra}'}
-
-    parts = candidates[0].content.parts if candidates[0].content else []
-    if not parts:
-        return {'error': 'Nano Banana 2: response contained no parts'}
-
-    for part in parts:
-        inline = getattr(part, 'inline_data', None)
-        if inline and inline.data:
-            img_bytes = inline.data
-            mime = getattr(inline, 'mime_type', None) or output_mime
-
-            if isinstance(img_bytes, str):
-                img_bytes = base64.b64decode(img_bytes)
-
-            img_bytes = _apply_resolution_output(img_bytes, resolution, mime)
-
-            b64 = base64.b64encode(img_bytes).decode('ascii')
-            return {'image': f'data:{mime};base64,{b64}'}
-
-    return {'error': 'Nano Banana 2: response contained no image data'}
-
-
-# ---------------------------------------------------------------------------
-# Image SCF prompt — vision model, text-only output (Style / Content / Feel)
-# ---------------------------------------------------------------------------
-
-def _mime_from_image_data_url(data_url: str) -> str:
-    if data_url.startswith('data:'):
-        semi = data_url.find(';')
-        if semi > 5:
-            mime = data_url[5:semi].strip().lower()
-            if mime in ('image/png', 'image/jpeg', 'image/jpg', 'image/webp'):
-                return 'image/jpeg' if mime == 'image/jpg' else mime
-    return 'image/png'
+IMAGE_SCF_ENDPOINT = 'fal-ai/any-llm/vision'
+# any-llm routes to the same model the node used directly before the migration,
+# which is why the output format and quality carried over unchanged.
+IMAGE_SCF_MODEL = 'google/gemini-2.5-flash'
 
 
 def _build_image_scf_instruction(data: dict) -> tuple[str | None, str | None]:
@@ -577,291 +136,85 @@ def _build_image_scf_instruction(data: dict) -> tuple[str | None, str | None]:
     return (None, header + body)
 
 
-def _extract_text_from_genai_response(response) -> str:
-    candidates = getattr(response, 'candidates', None) or []
-    if not candidates:
-        return ''
-    content = getattr(candidates[0], 'content', None)
-    parts = getattr(content, 'parts', None) if content else None
-    if not parts:
-        return ''
-    chunks: list[str] = []
-    for part in parts:
-        t = getattr(part, 'text', None)
-        if t:
-            chunks.append(t)
-    return '\n'.join(chunks).strip()
-
-
 async def _execute_image_scf_prompt(data: dict, inputs: dict) -> dict:
-    if not _HAS_GENAI:
-        raise ValueError(
-            'Image SCF: google-genai package is not installed. Run: pip install -U google-genai'
-        )
+    if not fal_common.HAS_FAL:
+        return {'error': f'Image SCF: {fal_common.MISSING_CLIENT_ERROR}'}
 
     err, instruction = _build_image_scf_instruction(data)
     if err:
         return {'error': err}
 
-    api_key = resolve_gemini_api_key(data)
+    api_key = fal_common.resolve_api_key(data)
     if not api_key:
-        return {
-            'error': (
-                'Image SCF: no API key configured. Add your key in Settings, set GEMINI_API_KEY, '
-                'or set apiKey on the node.'
-            ),
-        }
+        return {'error': f'Image SCF: {fal_common.NO_KEY_ERROR}'}
 
     raw_image = inputs.get('image') or data.get('image', '')
     if not raw_image or not str(raw_image).strip():
         return {'error': 'Image SCF: connect an image input.'}
 
-    data_url = str(raw_image).strip()
-    mime = _mime_from_image_data_url(data_url)
+    client = fal_common.make_client(api_key)
     try:
-        raw_b64 = _strip_data_url(data_url)
-        raw_bytes = base64.b64decode(raw_b64)
-    except Exception:
-        return {'error': 'Image SCF: could not decode image data.'}
-
-    client = genai.Client(api_key=api_key)
-    contents: list = [
-        types.Part.from_bytes(data=raw_bytes, mime_type=mime),
-        instruction,
-    ]
-
-    def _sync_generate():
-        return client.models.generate_content(
-            model=IMAGE_ANALYZER_MODEL,
-            contents=contents,
-        )
-
-    try:
-        response = await asyncio.to_thread(_sync_generate)
+        image_url = await fal_common.upload_image(client, str(raw_image).strip())
     except Exception as e:
-        err_msg = str(e)
-        if _is_gemini_api_key_auth_error(err_msg):
-            return {'error': f'Image SCF: Invalid or expired API key. ({err_msg})'}
-        if 'not found' in err_msg.lower() or '404' in err_msg:
-            return {
-                'error': (
-                    f'Image SCF: Model "{IMAGE_ANALYZER_MODEL}" not found. ({err_msg})'
-                ),
-            }
-        return {'error': f'Image SCF: API call failed — {err_msg}'}
+        return {
+            'error': fal_common.describe_error('Image SCF', IMAGE_SCF_ENDPOINT, str(e)),
+        }
 
-    text_out = _extract_text_from_genai_response(response)
+    try:
+        result = await client.subscribe(
+            IMAGE_SCF_ENDPOINT,
+            arguments={
+                'model': IMAGE_SCF_MODEL,
+                'prompt': instruction,
+                'image_url': image_url,
+            },
+            with_logs=False,
+        )
+    except Exception as e:
+        return {
+            'error': fal_common.describe_error('Image SCF', IMAGE_SCF_ENDPOINT, str(e)),
+        }
+
+    # any-llm reports model-side failures in the body rather than as an HTTP error.
+    model_error = (result or {}).get('error')
+    if model_error:
+        return {'error': f'Image SCF: {model_error}'}
+
+    text_out = ((result or {}).get('output') or '').strip()
     if not text_out:
-        block_reason = getattr(response, 'prompt_feedback', None)
-        extra = f' (block reason: {block_reason})' if block_reason else ''
-        return {'error': f'Image SCF: empty text response.{extra}'}
+        return {'error': 'Image SCF: empty text response.'}
 
     return {'text': text_out}
 
 
 # ---------------------------------------------------------------------------
-# GPT Image 2  —  OpenAI Images API (generations + edits with reference images)
-# ---------------------------------------------------------------------------
-
-
-def _gpt_image_2_openai_error_detail(resp: httpx.Response) -> str:
-    try:
-        err_json = resp.json()
-        err_obj = err_json.get('error', err_json)
-        if isinstance(err_obj, dict):
-            return str(err_obj.get('message', err_obj))
-        return str(err_obj)
-    except Exception:
-        return (resp.text or '')[:500]
-
-
-async def _execute_gpt_image_2(data: dict, inputs: dict) -> dict:
-    api_key = resolve_openai_api_key(data)
-    if not api_key:
-        return {
-            'error': (
-                'GPT Image 2: no API key configured. '
-                'Add your key in Settings, set OPENAI_API_KEY in backend/.env, or set apiKey on the node.'
-            ),
-        }
-
-    prompt = (inputs.get('prompt') or data.get('prompt') or '').strip()
-    if not prompt:
-        return {'error': 'GPT Image 2: no prompt provided'}
-
-    try:
-        ref_files = _collect_gpt_image_2_reference_files(inputs)
-    except ValueError as e:
-        return {'error': str(e)}
-
-    if len(ref_files) > GPT_IMAGE_2_MAX_REFERENCE_IMAGES:
-        return {
-            'error': (
-                f'GPT Image 2: at most {GPT_IMAGE_2_MAX_REFERENCE_IMAGES} reference images '
-                '(connect inputs in order: Image 1, Image 2, …).'
-            ),
-        }
-
-    size = _gpt_image_2_resolve_size(data)
-
-    quality = data.get('quality', 'auto')
-    if quality not in ('low', 'medium', 'high', 'auto'):
-        quality = 'auto'
-
-    output_format = data.get('outputFormat', 'png')
-    if output_format not in ('png', 'jpeg', 'webp'):
-        output_format = 'png'
-
-    moderation = data.get('moderation', 'auto')
-    if moderation not in ('auto', 'low'):
-        moderation = 'auto'
-
-    comp_val: int | None = None
-    comp = data.get('outputCompression')
-    if output_format in ('jpeg', 'webp') and comp is not None:
-        try:
-            c = int(comp)
-            if 0 <= c <= 100:
-                comp_val = c
-        except (TypeError, ValueError):
-            pass
-
-    headers_auth = {'Authorization': f'Bearer {api_key}'}
-
-    try:
-        async with httpx.AsyncClient(timeout=180.0, verify=_SSL_VERIFY) as client:
-            if ref_files:
-                edits_size = _gpt_image_2_edits_size(size)
-                form_data: dict[str, str] = {
-                    'model': GPT_IMAGE_2_MODEL,
-                    'prompt': prompt,
-                    'size': edits_size,
-                    'quality': quality,
-                    'output_format': output_format,
-                    'moderation': moderation,
-                }
-                if comp_val is not None:
-                    form_data['output_compression'] = str(comp_val)
-
-                file_parts: list[tuple[str, tuple[str, bytes, str]]] = []
-                for idx, (img_bytes, mime) in enumerate(ref_files):
-                    ext = '.png'
-                    if 'jpeg' in mime or 'jpg' in mime:
-                        ext = '.jpg'
-                    elif 'webp' in mime:
-                        ext = '.webp'
-                    file_parts.append(
-                        ('image[]', (f'ref_{idx}{ext}', img_bytes, mime or 'image/png')),
-                    )
-
-                resp = await client.post(
-                    'https://api.openai.com/v1/images/edits',
-                    headers=headers_auth,
-                    data=form_data,
-                    files=file_parts,
-                )
-            else:
-                body: dict = {
-                    'model': GPT_IMAGE_2_MODEL,
-                    'prompt': prompt,
-                    'n': 1,
-                    'size': size,
-                    'quality': quality,
-                    'output_format': output_format,
-                }
-                if moderation in ('auto', 'low'):
-                    body['moderation'] = moderation
-                if comp_val is not None:
-                    body['output_compression'] = comp_val
-
-                resp = await client.post(
-                    'https://api.openai.com/v1/images/generations',
-                    json=body,
-                    headers={**headers_auth, 'Content-Type': 'application/json'},
-                )
-    except httpx.TimeoutException:
-        return {'error': 'GPT Image 2: request timed out.'}
-    except httpx.RequestError as e:
-        return {'error': f'GPT Image 2: network error — {e}'}
-
-    if resp.status_code != 200:
-        detail = _gpt_image_2_openai_error_detail(resp)
-        return {'error': f'GPT Image 2: API error ({resp.status_code}) — {detail}'}
-
-    try:
-        payload = resp.json()
-    except Exception:
-        return {'error': 'GPT Image 2: invalid JSON response from API.'}
-
-    img_bytes, err = _gpt_image_2_decode_response_image(payload)
-    if err:
-        return err
-
-    mime = {
-        'png': 'image/png',
-        'jpeg': 'image/jpeg',
-        'webp': 'image/webp',
-    }.get(output_format, 'image/png')
-    out_b64 = base64.b64encode(img_bytes).decode('ascii')
-    return {'image': f'data:{mime};base64,{out_b64}'}
-
-
-# ---------------------------------------------------------------------------
-# fal.ai  —  FLUX / Stable Diffusion / SDXL via fal-client SDK
+# FAL AI  —  image generation
 # ---------------------------------------------------------------------------
 
 # Registry of supported fal models. Each entry maps a node-type-friendly key
 # to a fal endpoint slug plus the parameter shape we should send.
-#   size_param:  'image_size' (FLUX/SD enum) | 'aspect_ratio' (Nano Banana) | None
-#   image_input: 'single' (image_url) | 'multi' (image_urls list) | None
-FAL_MODELS: dict[str, dict] = {
-    'flux_dev': {
-        'endpoint': 'fal-ai/flux/dev',
-        'size_param': 'image_size',
-        'image_input': None,
-    },
-    'flux_schnell': {
-        'endpoint': 'fal-ai/flux/schnell',
-        'size_param': 'image_size',
-        'image_input': None,
-    },
-    'flux_pro_v11': {
-        'endpoint': 'fal-ai/flux-pro/v1.1',
-        'size_param': 'image_size',
-        'image_input': None,
-    },
-    'flux_redux_dev': {
-        'endpoint': 'fal-ai/flux/dev/redux',
-        'size_param': 'image_size',
-        'image_input': 'single',
-    },
-    'sd35_large': {
-        'endpoint': 'fal-ai/stable-diffusion-v35-large',
-        'size_param': 'image_size',
-        'image_input': None,
-    },
-    'fast_sdxl': {
-        'endpoint': 'fal-ai/fast-sdxl',
-        'size_param': 'image_size',
-        'image_input': 'single',
-    },
-    'nano_banana': {
-        'endpoint': 'fal-ai/nano-banana',
-        'size_param': 'aspect_ratio',
-        'image_input': None,
-    },
-    'nano_banana_edit': {
-        'endpoint': 'fal-ai/nano-banana/edit',
-        'size_param': None,
-        'image_input': 'multi',
-    },
-    'nano_banana_pro': {
-        'endpoint': 'fal-ai/nano-banana-pro',
-        'size_param': 'aspect_ratio',
-        'image_input': 'multi',
-    },
-}
-
+#   size_param:   'image_size' (FLUX/SD enum) | 'aspect_ratio' (Nano Banana) | None
+#   image_input:  'single' (image_url) | 'multi' (image_urls list) | None
+#                 — describes what `endpoint` itself accepts.
+#   edit_endpoint / edit_image_input:
+#                 several fal models split text-to-image and image-to-image across two
+#                 separate slugs; the base slug rejects (or silently drops) image input.
+#                 When reference images are connected we switch to `edit_endpoint`.
+#                 Both slugs in each pair take the same size_param, so it is not duplicated.
+#   requires_image: endpoint cannot run without at least one reference image.
+#   supports_prompt: False for pure image-variation endpoints that have no `prompt` field.
+#   supports_seed / supports_num_images: default True; set False for endpoints whose
+#                 schema has no such field — sending one anyway either errors or is silently
+#                 dropped, so we gate on it instead of assuming every model has it.
+#   supports_steps: default False. Only the FLUX/SD family (plus Z-Image) exposes
+#                 num_inference_steps; every other image_size model manages its own
+#                 sampling and must opt in explicitly.
+#   size_options / aspect_options: per-model override of the size/aspect-ratio enum.
+#                 Falls back to FAL_IMAGE_SIZE_PRESETS / FAL_ASPECT_RATIO_PRESETS.
+#   extra_params: {fal_argument_name: {data_key, values, default}} for cost- or
+#                 quality-affecting fields with no generic home (quality, resolution,
+#                 rendering speed, ...). Read from `data[data_key]`, validated against
+#                 `values`, falls back to `default`.
 FAL_IMAGE_SIZE_PRESETS = frozenset({
     'square_hd', 'square',
     'portrait_4_3', 'portrait_16_9',
@@ -872,73 +225,238 @@ FAL_ASPECT_RATIO_PRESETS = frozenset({
     '1:1', '4:3', '3:4', '3:2', '2:3', '16:9', '9:16', '21:9',
 })
 
+# GPT Image 2 and Seedream 5 Pro add an `auto`-flavoured size option on top of the
+# shared preset list rather than replacing it.
+FAL_GPT_IMAGE2_SIZE_OPTIONS = FAL_IMAGE_SIZE_PRESETS | {'auto'}
+FAL_SEEDREAM_SIZE_OPTIONS = FAL_IMAGE_SIZE_PRESETS | {'auto_1K', 'auto_2K'}
 
-def _is_fal_auth_error(err_msg: str) -> bool:
-    u = err_msg.upper()
-    return (
-        '401' in err_msg
-        or '403' in err_msg
-        or 'UNAUTHORIZED' in u
-        or 'FORBIDDEN' in u
-        or 'INVALID API KEY' in u
-        or 'INVALID_API_KEY' in u
-    )
+FAL_NANO_BANANA_2_ASPECT_OPTIONS = frozenset({
+    'auto', '21:9', '16:9', '3:2', '4:3', '5:4', '1:1',
+    '4:5', '3:4', '2:3', '9:16', '4:1', '1:4', '8:1', '1:8',
+})
 
+FAL_MODELS: dict[str, dict] = {
+    'flux_dev': {
+        'endpoint': 'fal-ai/flux/dev',
+        'size_param': 'image_size',
+        'image_input': None,
+        'supports_steps': True,
+    },
+    'flux_schnell': {
+        'endpoint': 'fal-ai/flux/schnell',
+        'size_param': 'image_size',
+        'image_input': None,
+        'supports_steps': True,
+    },
+    'flux_pro_v11': {
+        'endpoint': 'fal-ai/flux-pro/v1.1',
+        'size_param': 'image_size',
+        'image_input': None,
+        # v1.1 pro manages its own sampling and has no num_inference_steps field.
+        'supports_steps': False,
+    },
+    'flux_redux_dev': {
+        # Redux re-imagines an input image and has no `prompt` field at all.
+        'endpoint': 'fal-ai/flux/dev/redux',
+        'size_param': 'image_size',
+        'image_input': 'single',
+        'requires_image': True,
+        'supports_prompt': False,
+        'supports_steps': True,
+    },
+    'sd35_large': {
+        'endpoint': 'fal-ai/stable-diffusion-v35-large',
+        'size_param': 'image_size',
+        'image_input': None,
+        'supports_steps': True,
+    },
+    'fast_sdxl': {
+        'endpoint': 'fal-ai/fast-sdxl',
+        'size_param': 'image_size',
+        'image_input': None,
+        'edit_endpoint': 'fal-ai/fast-sdxl/image-to-image',
+        'edit_image_input': 'single',
+        'supports_steps': True,
+    },
+    'nano_banana': {
+        'endpoint': 'fal-ai/nano-banana',
+        'size_param': 'aspect_ratio',
+        'image_input': None,
+    },
+    'nano_banana_edit': {
+        'endpoint': 'fal-ai/nano-banana/edit',
+        'size_param': None,
+        'image_input': 'multi',
+        'requires_image': True,
+    },
+    'nano_banana_pro': {
+        'endpoint': 'fal-ai/nano-banana-pro',
+        'size_param': 'aspect_ratio',
+        'image_input': None,
+        'edit_endpoint': 'fal-ai/nano-banana-pro/edit',
+        'edit_image_input': 'multi',
+    },
+    'gpt_image_2': {
+        'endpoint': 'openai/gpt-image-2',
+        'size_param': 'image_size',
+        'image_input': None,
+        'edit_endpoint': 'openai/gpt-image-2/edit',
+        'edit_image_input': 'multi',
+        'size_options': FAL_GPT_IMAGE2_SIZE_OPTIONS,
+        'supports_seed': False,
+        'extra_params': {
+            'quality': {
+                'data_key': 'quality',
+                'values': ('auto', 'low', 'medium', 'high'),
+                'default': 'high',
+            },
+        },
+    },
+    'flux_2_pro': {
+        'endpoint': 'fal-ai/flux-2-pro',
+        'size_param': 'image_size',
+        'image_input': None,
+        'edit_endpoint': 'fal-ai/flux-2-pro/edit',
+        'edit_image_input': 'multi',
+        'supports_num_images': False,
+    },
+    'nano_banana_2': {
+        'endpoint': 'fal-ai/nano-banana-2',
+        'size_param': 'aspect_ratio',
+        'image_input': None,
+        'edit_endpoint': 'fal-ai/nano-banana-2/edit',
+        'edit_image_input': 'multi',
+        'aspect_options': FAL_NANO_BANANA_2_ASPECT_OPTIONS,
+        'extra_params': {
+            'resolution': {
+                'data_key': 'resolution',
+                'values': ('0.5K', '1K', '2K', '4K'),
+                'default': '1K',
+            },
+        },
+    },
+    'seedream_v5_pro': {
+        'endpoint': 'bytedance/seedream/v5/pro/text-to-image',
+        'size_param': 'image_size',
+        'image_input': None,
+        'edit_endpoint': 'bytedance/seedream/v5/pro/edit',
+        'edit_image_input': 'multi',
+        'size_options': FAL_SEEDREAM_SIZE_OPTIONS,
+        'supports_seed': False,
+    },
+    'ideogram_v4': {
+        'endpoint': 'ideogram/v4',
+        'size_param': 'image_size',
+        'image_input': None,
+        'edit_endpoint': 'ideogram/v4/image-to-image',
+        'edit_image_input': 'single',
+        'extra_params': {
+            'rendering_speed': {
+                'data_key': 'renderingSpeed',
+                'values': ('TURBO', 'BALANCED', 'QUALITY'),
+                'default': 'BALANCED',
+            },
+        },
+    },
+    'recraft_v41': {
+        'endpoint': 'fal-ai/recraft/v4.1/text-to-image',
+        'size_param': 'image_size',
+        'image_input': None,
+        'supports_seed': False,
+        'supports_num_images': False,
+    },
+    'z_image_turbo': {
+        'endpoint': 'fal-ai/z-image/turbo',
+        'size_param': 'image_size',
+        'image_input': None,
+        'edit_endpoint': 'fal-ai/z-image/turbo/image-to-image',
+        'edit_image_input': 'single',
+        'supports_steps': True,
+    },
+}
 
-async def _fal_upload_reference_image(b64_data_url_or_raw: str) -> str:
-    """Upload a base64 image to fal storage and return its CDN url."""
-    raw = _strip_data_url(b64_data_url_or_raw)
-    img_bytes = base64.b64decode(raw)
-    return await fal_client.upload_async(img_bytes, 'image/png')
+FAL_MODEL_LABELS: dict[str, str] = {
+    'flux_dev': 'FLUX.1 [dev]',
+    'flux_schnell': 'FLUX.1 [schnell] (fast)',
+    'flux_pro_v11': 'FLUX1.1 [pro]',
+    'flux_redux_dev': 'FLUX.1 [dev] Redux (image variation, no prompt)',
+    'sd35_large': 'Stable Diffusion 3.5 Large',
+    'fast_sdxl': 'Fast SDXL',
+    'nano_banana': 'Nano Banana (Gemini 2.5 Flash Image)',
+    'nano_banana_edit': 'Nano Banana Edit (image-to-image)',
+    'nano_banana_pro': 'Nano Banana Pro',
+    'gpt_image_2': 'GPT Image 2',
+    'flux_2_pro': 'FLUX.2 [pro]',
+    'nano_banana_2': 'Nano Banana 2',
+    'seedream_v5_pro': 'Seedream 5 Pro',
+    'ideogram_v4': 'Ideogram 4',
+    'recraft_v41': 'Recraft V4.1',
+    'z_image_turbo': 'Z-Image Turbo',
+}
 
 
 async def _execute_fal_ai(data: dict, inputs: dict) -> dict:
-    if not _HAS_FAL:
-        return {
-            'error': (
-                'FAL AI: fal-client package is not installed. '
-                'Run: pip install -U fal-client'
-            ),
-        }
+    if not fal_common.HAS_FAL:
+        return {'error': f'FAL AI: {fal_common.MISSING_CLIENT_ERROR}'}
 
     model_key = (data.get('model') or 'flux_dev').strip()
     model_spec = FAL_MODELS.get(model_key)
     if not model_spec:
         return {'error': f'FAL AI: unknown model "{model_key}".'}
 
-    api_key = resolve_fal_api_key(data)
+    api_key = fal_common.resolve_api_key(data)
     if not api_key:
+        return {'error': f'FAL AI: {fal_common.NO_KEY_ERROR}'}
+
+    ref_images = _collect_reference_images(inputs)
+
+    # Connecting a reference image selects the image-to-image variant for models
+    # that split the two modes across separate endpoints.
+    endpoint = model_spec['endpoint']
+    image_input_kind = model_spec.get('image_input')
+    if ref_images and model_spec.get('edit_endpoint'):
+        endpoint = model_spec['edit_endpoint']
+        image_input_kind = model_spec.get('edit_image_input')
+    if not image_input_kind:
+        ref_images = []
+    elif image_input_kind == 'single':
+        ref_images = ref_images[:1]
+
+    if model_spec.get('requires_image') and not ref_images:
         return {
             'error': (
-                'FAL AI: no API key configured. '
-                'Add your key in Settings, set FAL_KEY in backend/.env, or set apiKey on the node.'
+                f'FAL AI: model "{model_key}" requires a reference image. '
+                'Connect an image to Image 1.'
             ),
         }
 
+    supports_prompt = model_spec.get('supports_prompt', True)
     prompt = (inputs.get('prompt') or data.get('prompt') or '').strip()
-    if not prompt:
+    if supports_prompt and not prompt:
         return {'error': 'FAL AI: no prompt provided'}
 
-    arguments: dict = {
-        'prompt': prompt,
-        'num_images': 1,
-    }
+    arguments: dict = {}
+    if model_spec.get('supports_num_images', True):
+        arguments['num_images'] = 1
+    if supports_prompt:
+        arguments['prompt'] = prompt
 
     size_param = model_spec.get('size_param')
     if size_param == 'image_size':
+        size_options = model_spec.get('size_options', FAL_IMAGE_SIZE_PRESETS)
         size = (data.get('imageSize') or 'square_hd').strip()
-        if size not in FAL_IMAGE_SIZE_PRESETS:
+        if size not in size_options:
             size = 'square_hd'
         arguments['image_size'] = size
     elif size_param == 'aspect_ratio':
+        aspect_options = model_spec.get('aspect_options', FAL_ASPECT_RATIO_PRESETS)
         ar = (data.get('aspectRatio') or '1:1').strip()
-        if ar not in FAL_ASPECT_RATIO_PRESETS:
+        if ar not in aspect_options:
             ar = '1:1'
         arguments['aspect_ratio'] = ar
 
     steps_raw = data.get('numInferenceSteps')
-    if steps_raw is not None and size_param == 'image_size':
-        # Only FLUX/SD endpoints accept num_inference_steps; nano-banana ignores it.
+    if steps_raw is not None and model_spec.get('supports_steps', False):
         try:
             steps = int(steps_raw)
             if 1 <= steps <= 50:
@@ -946,75 +464,45 @@ async def _execute_fal_ai(data: dict, inputs: dict) -> dict:
         except (TypeError, ValueError):
             pass
 
-    seed_val = 0
-    try:
-        seed_val = int(data.get('seed', 0) or 0)
-    except (TypeError, ValueError):
-        seed_val = 0
-    if seed_val > 0:
+    for arg_name, extra_spec in model_spec.get('extra_params', {}).items():
+        raw_val = data.get(extra_spec['data_key'])
+        value = raw_val.strip() if isinstance(raw_val, str) else None
+        allowed_values = extra_spec.get('values')
+        if not value or (allowed_values and value not in allowed_values):
+            value = extra_spec['default']
+        arguments[arg_name] = value
+
+    seed_val = _resolve_seed(data) if model_spec.get('supports_seed', True) else None
+    if seed_val is not None:
         arguments['seed'] = seed_val
 
-    # fal_client reads FAL_KEY from the environment for both upload and inference.
-    # Set it for the duration of this call (covers uploads + subscribe) and restore after.
-    prev_key = os.environ.get('FAL_KEY')
-    os.environ['FAL_KEY'] = api_key
-    try:
-        image_input_kind = model_spec.get('image_input')
-        if image_input_kind:
-            ref_images = _collect_reference_images(inputs)
-            if ref_images:
-                try:
-                    uploaded = []
-                    for ref in ref_images:
-                        uploaded.append(await _fal_upload_reference_image(ref))
-                except Exception as e:
-                    err_msg = str(e)
-                    if _is_fal_auth_error(err_msg):
-                        return {
-                            'error': (
-                                'FAL AI: invalid or expired API key while uploading '
-                                f'reference image. ({err_msg})'
-                            ),
-                        }
-                    return {'error': f'FAL AI: could not upload reference image — {err_msg}'}
-                if image_input_kind == 'single':
-                    arguments['image_url'] = uploaded[0]
-                else:
-                    arguments['image_urls'] = uploaded
-            elif image_input_kind == 'multi' and model_spec['endpoint'].endswith('/edit'):
-                # Edit endpoints require at least one input image.
-                return {
-                    'error': (
-                        'FAL AI: this edit model requires a reference image. '
-                        'Connect an image to Image 1.'
-                    ),
-                }
+    fal_model_label = FAL_MODEL_LABELS.get(model_key, model_key)
+    client = fal_common.make_client(api_key)
 
+    if ref_images:
         try:
-            result = await fal_client.subscribe_async(
-                model_spec['endpoint'],
-                arguments=arguments,
-                with_logs=False,
-            )
+            uploaded = []
+            for ref in ref_images:
+                uploaded.append(await fal_common.upload_image(client, ref))
         except Exception as e:
             err_msg = str(e)
-            if _is_fal_auth_error(err_msg):
-                return {'error': f'FAL AI: Invalid or expired API key. ({err_msg})'}
-            if '404' in err_msg or 'not found' in err_msg.lower():
+            if fal_common.is_auth_error(err_msg):
                 return {
                     'error': (
-                        f'FAL AI: model endpoint "{model_spec["endpoint"]}" not found. '
-                        f'You may need access. ({err_msg})'
+                        'FAL AI: invalid or expired API key while uploading '
+                        f'reference image. ({err_msg})'
                     ),
                 }
-            if '429' in err_msg or 'quota' in err_msg.lower() or 'rate' in err_msg.lower():
-                return {'error': f'FAL AI: rate-limited or out of quota. ({err_msg})'}
-            return {'error': f'FAL AI: API call failed — {err_msg}'}
-    finally:
-        if prev_key is None:
-            os.environ.pop('FAL_KEY', None)
+            return {'error': f'FAL AI: could not upload reference image — {err_msg}'}
+        if image_input_kind == 'single':
+            arguments['image_url'] = uploaded[0]
         else:
-            os.environ['FAL_KEY'] = prev_key
+            arguments['image_urls'] = uploaded
+
+    try:
+        result = await client.subscribe(endpoint, arguments=arguments, with_logs=False)
+    except Exception as e:
+        return {'error': fal_common.describe_error('FAL AI', endpoint, str(e))}
 
     images = (result or {}).get('images') or []
     if not images:
@@ -1025,28 +513,393 @@ async def _execute_fal_ai(data: dict, inputs: dict) -> dict:
     if not img_url:
         return {'error': 'FAL AI: API response missing image url.'}
 
-    try:
-        async with httpx.AsyncClient(timeout=120.0, verify=_SSL_VERIFY) as client:
-            img_resp = await client.get(img_url)
-        if img_resp.status_code != 200:
-            return {
-                'error': (
-                    f'FAL AI: failed to download generated image '
-                    f'({img_resp.status_code}).'
-                ),
-            }
-        img_bytes = img_resp.content
-    except httpx.TimeoutException:
-        return {'error': 'FAL AI: timed out fetching generated image.'}
-    except httpx.RequestError as e:
-        return {'error': f'FAL AI: network error fetching image — {e}'}
+    img_bytes, mime, err = await fal_common.download_image(img_url, 'FAL AI')
+    if err:
+        return {'error': err}
 
-    mime = first.get('content_type') or 'image/png'
-    if mime not in ('image/png', 'image/jpeg', 'image/webp'):
-        mime = 'image/png'
+    declared = first.get('content_type')
+    if declared in ('image/png', 'image/jpeg', 'image/webp'):
+        mime = declared
 
     out_b64 = base64.b64encode(img_bytes).decode('ascii')
-    return {'image': f'data:{mime};base64,{out_b64}'}
+    meta_prompt = prompt if supports_prompt else ''
+    return _image_result(
+        f'data:{mime};base64,{out_b64}',
+        meta_prompt,
+        seed_val,
+        fal_model_label,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Image to 3D
+# ---------------------------------------------------------------------------
+
+# Keep keys in sync with frontend IMAGE_TO_3D_MODEL_SPECS.
+# image_arg / extra_params / mesh_paths are data-driven so a third model is
+# one dict entry. mesh_paths are dotted lookups into the fal response.
+DEFAULT_IMAGE_TO_3D_MODEL = 'tripo_h31'
+
+IMAGE_TO_3D_MODELS: dict[str, dict] = {
+    'tripo_h31': {
+        'endpoint': 'tripo3d/h3.1/image-to-3d',
+        'label': 'Tripo H3.1 (textured)',
+        'image_arg': 'image_url',
+        'mesh_paths': (
+            'model_urls.glb.url',
+            'model_mesh.url',
+            'model_glb.url',
+            'glb.url',
+        ),
+        'thumb_paths': ('rendered_image.url', 'thumbnail.url'),
+        'fixed_params': {},
+        'extra_params': (
+            {'data_key': 'textureQuality', 'api_key': 'texture_quality', 'default': 'standard'},
+        ),
+    },
+    'hunyuan_v21': {
+        # Verified against a live run: the response carries `model_glb`
+        # (untextured) and `model_glb_pbr` (textured) — both real .glb URLs —
+        # plus `model_mesh`, which is a .zip of loose assets, not a mesh this
+        # pipeline can use. No thumbnail-shaped field comes back at all.
+        'endpoint': 'fal-ai/hunyuan3d-v21',
+        'label': 'Hunyuan3D 2.1 (PBR textured)',
+        'image_arg': 'input_image_url',
+        'mesh_paths': (
+            'model_glb_pbr.url',
+            'model_glb.url',
+            'model_urls.glb.url',
+        ),
+        'thumb_paths': (),
+        'fixed_params': {'textured_mesh': True},
+        'extra_params': (),
+    },
+    'hunyuan_rapid': {
+        # The slug without the fal-ai/ prefix 404s.
+        #
+        # Textured mode returns OBJ + MTL + a texture PNG and no GLB at all —
+        # its `model_glb` field is documented as holding an .obj. enable_geometry
+        # is the only mode that yields GLB, at the cost of textures, so this
+        # entry is the fast untextured draft rather than a Tripo substitute.
+        'endpoint': 'fal-ai/hunyuan-3d/v3.1/rapid/image-to-3d',
+        'label': 'Hunyuan 3D 3.1 Rapid (fast, untextured)',
+        'image_arg': 'input_image_url',
+        'mesh_paths': (
+            'model_urls.glb.url',
+            'model_glb.url',
+            'glb.url',
+        ),
+        'thumb_paths': ('thumbnail.url', 'rendered_image.url'),
+        'fixed_params': {'enable_geometry': True},
+        'extra_params': (),
+    },
+}
+
+# Response fields whose name already promises a GLB, so the URL extension is
+# not second-guessed. Everything else is extension-checked because Hunyuan
+# ships an .obj under `model_glb`.
+_TRUSTED_GLB_PATHS = frozenset({'model_urls.glb.url', 'glb.url'})
+
+
+def _dig(obj, path: str):
+    cur = obj
+    for part in path.split('.'):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+_NON_GLB_SUFFIXES = (
+    '.obj', '.fbx', '.mtl', '.usdz', '.png', '.jpg', '.jpeg', '.webp', '.zip',
+)
+
+
+def _looks_like_glb(url: str, content_type: str = '') -> bool:
+    bare = url.split('?', 1)[0].lower()
+    mime = (content_type or '').lower()
+    if bare.endswith(('.glb', '.gltf')) or 'gltf' in mime:
+        return True
+    if any(bare.endswith(ext) for ext in _NON_GLB_SUFFIXES):
+        return False
+    return True
+
+
+def _file_url(value, glb_only: bool = False) -> str | None:
+    url = None
+    content_type = ''
+    if isinstance(value, str) and value.startswith(('http://', 'https://')):
+        url = value
+    elif isinstance(value, dict):
+        candidate = value.get('url')
+        if isinstance(candidate, str) and candidate.startswith(('http://', 'https://')):
+            url = candidate
+            content_type = str(value.get('content_type') or '')
+    if not url:
+        return None
+    if glb_only and not _looks_like_glb(url, content_type):
+        return None
+    return url
+
+
+def _first_url(result, paths: tuple[str, ...], glb_only: bool = False) -> str | None:
+    for path in paths:
+        check = glb_only and path not in _TRUSTED_GLB_PATHS
+        found = _file_url(_dig(result, path), glb_only=check)
+        if found:
+            return found
+    return None
+
+
+def _describe_result_shape(result) -> str:
+    """Summarize a fal response so a shape mismatch is self-diagnosing."""
+    if not isinstance(result, dict):
+        return f'response was {type(result).__name__}'
+    parts: list[str] = []
+    for key in sorted(result.keys()):
+        value = result[key]
+        if isinstance(value, dict) and isinstance(value.get('url'), str):
+            name = value.get('file_name') or value['url'].split('?', 1)[0].rsplit('/', 1)[-1]
+            parts.append(f'{key}={name}')
+        elif isinstance(value, dict):
+            inner = sorted(k for k, v in value.items() if isinstance(v, dict) and v.get('url'))
+            parts.append(f'{key}{{{", ".join(inner) or "none"}}}')
+        else:
+            parts.append(key)
+    return ', '.join(parts) or 'empty response'
+
+
+def _find_mesh_url(obj, depth: int = 0) -> str | None:
+    """Last-resort walk for a GLB URL when the documented path is missing."""
+    if depth > 6 or obj is None:
+        return None
+    if isinstance(obj, str):
+        bare = obj.split('?', 1)[0].lower()
+        if obj.startswith(('http://', 'https://')) and bare.endswith(('.glb', '.gltf')):
+            return obj
+        return None
+    if isinstance(obj, dict):
+        nested_urls = obj.get('model_urls')
+        if isinstance(nested_urls, dict):
+            found = _file_url(nested_urls.get('glb'), glb_only=True)
+            if found:
+                return found
+        for key in ('model_mesh', 'model_glb', 'glb', 'mesh', 'model'):
+            if key in obj:
+                found = _file_url(obj[key], glb_only=True) or _find_mesh_url(obj[key], depth + 1)
+                if found:
+                    return found
+        for value in obj.values():
+            found = _find_mesh_url(value, depth + 1)
+            if found:
+                return found
+    if isinstance(obj, list):
+        for item in obj:
+            found = _find_mesh_url(item, depth + 1)
+            if found:
+                return found
+    return None
+
+
+async def _execute_image_to_3d(data: dict, inputs: dict) -> dict:
+    if not fal_common.HAS_FAL:
+        return {'error': f'Image to 3D: {fal_common.MISSING_CLIENT_ERROR}'}
+
+    api_key = fal_common.resolve_api_key(data)
+    if not api_key:
+        return {'error': f'Image to 3D: {fal_common.NO_KEY_ERROR}'}
+
+    model_key = (data.get('model') or DEFAULT_IMAGE_TO_3D_MODEL).strip()
+    spec = IMAGE_TO_3D_MODELS.get(model_key)
+    if not spec:
+        return {'error': f'Image to 3D: unknown model "{model_key}".'}
+
+    raw_image = inputs.get('image') or data.get('image', '')
+    if not raw_image or not str(raw_image).strip():
+        return {'error': 'Image to 3D: connect an image input.'}
+
+    endpoint = spec['endpoint']
+    client = fal_common.make_client(api_key)
+    try:
+        image_url = await fal_common.upload_image(client, str(raw_image).strip())
+    except Exception as e:
+        return {'error': fal_common.describe_error('Image to 3D', endpoint, str(e))}
+
+    arguments: dict = {spec['image_arg']: image_url}
+    arguments.update(spec.get('fixed_params') or {})
+    for extra in spec.get('extra_params') or ():
+        data_key = extra['data_key']
+        api_key_name = extra['api_key']
+        value = data.get(data_key, extra.get('default'))
+        if value is not None and value != '':
+            arguments[api_key_name] = value
+
+    try:
+        result = await client.subscribe(endpoint, arguments=arguments, with_logs=False)
+    except Exception as e:
+        err_msg = str(e)
+        alt_arg = 'image_url' if spec['image_arg'] != 'image_url' else 'input_image_url'
+        lowered = err_msg.lower()
+        if alt_arg in lowered or '422' in err_msg:
+            try:
+                alt_args = {k: v for k, v in arguments.items() if k != spec['image_arg']}
+                alt_args[alt_arg] = image_url
+                result = await client.subscribe(endpoint, arguments=alt_args, with_logs=False)
+            except Exception as e2:
+                return {'error': fal_common.describe_error('Image to 3D', endpoint, str(e2))}
+        else:
+            return {'error': fal_common.describe_error('Image to 3D', endpoint, err_msg)}
+
+    mesh_url = _first_url(result, spec['mesh_paths'], glb_only=True) or _find_mesh_url(result)
+    if not mesh_url:
+        return {
+            'error': (
+                f'Image to 3D: {spec["label"]} returned no GLB — got '
+                f'{_describe_result_shape(result)}. Try the other model in the dropdown.'
+            )
+        }
+
+    raw, _mime, err = await fal_common.download_file(mesh_url, 'Image to 3D')
+    if err:
+        return {'error': err}
+    if not raw:
+        return {'error': 'Image to 3D: downloaded mesh was empty.'}
+
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    asset_id = f'{uuid.uuid4()}.glb'
+    dest = os.path.join(MODELS_DIR, asset_id)
+    with open(dest, 'wb') as f:
+        f.write(raw)
+
+    thumbnail = None
+    thumb_url = _first_url(result, spec['thumb_paths'])
+    if thumb_url:
+        thumb_bytes, thumb_mime, thumb_err = await fal_common.download_image(thumb_url, 'Image to 3D')
+        if thumb_bytes and not thumb_err:
+            thumbnail = fal_common.to_data_url(thumb_bytes, thumb_mime)
+
+    return {
+        'model': {
+            'assetId': asset_id,
+            'url': f'/api/model/{asset_id}',
+            'format': 'glb',
+            'sizeBytes': len(raw),
+        },
+        'thumbnail': thumbnail,
+        '_meta': _gen_meta('', None, spec['label']),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Upscaler  —  image in, larger image out
+# ---------------------------------------------------------------------------
+
+# Keep keys in sync with frontend UPSCALER_MODEL_SPECS.
+# Both models take `image_url` and return a single `image` object (not the
+# `images` array FAL AI's generators use) — verified against each endpoint's
+# live OpenAPI schema. scale_arg is the fal argument name for the scale
+# dropdown; both endpoints accept it as a number, 1–4 (esrgan allows up to 8,
+# but we cap the dropdown at the shared 2/4 range both models support well).
+DEFAULT_UPSCALER_MODEL = 'esrgan'
+
+UPSCALER_MODELS: dict[str, dict] = {
+    'esrgan': {
+        'endpoint': 'fal-ai/esrgan',
+        'label': 'Real-ESRGAN (fast)',
+        'image_arg': 'image_url',
+        'scale_arg': 'scale',
+        'supports_prompt': False,
+    },
+    'clarity': {
+        'endpoint': 'fal-ai/clarity-upscaler',
+        'label': 'Clarity Upscaler (quality)',
+        'image_arg': 'image_url',
+        'scale_arg': 'upscale_factor',
+        'supports_prompt': True,
+    },
+}
+
+UPSCALER_SCALE_VALUES = ('2', '4')
+DEFAULT_UPSCALER_SCALE = '2'
+
+
+async def _execute_upscaler(data: dict, inputs: dict) -> dict:
+    if not fal_common.HAS_FAL:
+        return {'error': f'Upscaler: {fal_common.MISSING_CLIENT_ERROR}'}
+
+    api_key = fal_common.resolve_api_key(data)
+    if not api_key:
+        return {'error': f'Upscaler: {fal_common.NO_KEY_ERROR}'}
+
+    model_key = (data.get('model') or DEFAULT_UPSCALER_MODEL).strip()
+    spec = UPSCALER_MODELS.get(model_key)
+    if not spec:
+        return {'error': f'Upscaler: unknown model "{model_key}".'}
+
+    raw_image = inputs.get('image') or data.get('image', '')
+    if not raw_image or not str(raw_image).strip():
+        return {'error': 'Upscaler: connect an image input.'}
+
+    scale_raw = str(data.get('scale') or DEFAULT_UPSCALER_SCALE).strip()
+    if scale_raw not in UPSCALER_SCALE_VALUES:
+        scale_raw = DEFAULT_UPSCALER_SCALE
+    try:
+        scale_val = int(scale_raw)
+    except ValueError:
+        scale_val = 2
+
+    prompt = ''
+    if spec.get('supports_prompt'):
+        prompt = (inputs.get('prompt') or data.get('prompt') or '').strip()
+
+    endpoint = spec['endpoint']
+    client = fal_common.make_client(api_key)
+    try:
+        image_url = await fal_common.upload_image(client, str(raw_image).strip())
+    except Exception as e:
+        err_msg = str(e)
+        if fal_common.is_auth_error(err_msg):
+            return {
+                'error': (
+                    f'Upscaler: invalid or expired API key while uploading '
+                    f'image. ({err_msg})'
+                ),
+            }
+        return {'error': f'Upscaler: could not upload image — {err_msg}'}
+
+    arguments: dict = {
+        spec['image_arg']: image_url,
+        spec['scale_arg']: scale_val,
+    }
+    if prompt:
+        arguments['prompt'] = prompt
+
+    try:
+        result = await client.subscribe(endpoint, arguments=arguments, with_logs=False)
+    except Exception as e:
+        return {'error': fal_common.describe_error('Upscaler', endpoint, str(e))}
+
+    img_obj = (result or {}).get('image')
+    img_url = img_obj.get('url') if isinstance(img_obj, dict) else None
+    if not img_url:
+        return {'error': 'Upscaler: API response missing image url.'}
+
+    img_bytes, mime, err = await fal_common.download_image(img_url, 'Upscaler')
+    if err:
+        return {'error': err}
+
+    declared = img_obj.get('content_type') if isinstance(img_obj, dict) else None
+    if declared in ('image/png', 'image/jpeg', 'image/webp'):
+        mime = declared
+
+    out_b64 = base64.b64encode(img_bytes).decode('ascii')
+    seed_val = result.get('seed') if isinstance(result, dict) else None
+    return _image_result(
+        f'data:{mime};base64,{out_b64}',
+        prompt,
+        seed_val if isinstance(seed_val, int) else None,
+        spec['label'],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1054,21 +907,14 @@ async def _execute_fal_ai(data: dict, inputs: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def execute_ai_node(node_type: str, data: dict, inputs: dict) -> dict:
-    if node_type == 'nanoBananaPro':
-        return await _execute_nano_banana_pro(data, inputs)
-    if node_type == 'nanoBanana2':
-        return await _execute_nano_banana_2(data, inputs)
-    if node_type == 'gptImage2':
-        return await _execute_gpt_image_2(data, inputs)
-    if node_type == 'imageScfPrompt':
-        return await _execute_image_scf_prompt(data, inputs)
     if node_type == 'falAi':
         return await _execute_fal_ai(data, inputs)
-    if node_type == 'nanoBanana2Free':
-        return {
-            'error': (
-                'This workflow still contains "Nano Banana 2 Free", which was removed. '
-                'Replace it with Nano Banana 2 or Nano Banana Pro.'
-            ),
-        }
+    if node_type == 'imageScfPrompt':
+        return await _execute_image_scf_prompt(data, inputs)
+    if node_type == 'imageTo3d':
+        return await _execute_image_to_3d(data, inputs)
+    if node_type == 'upscaler':
+        return await _execute_upscaler(data, inputs)
+    if node_type in LEGACY_NODES:
+        return {'error': legacy_node_error(node_type)}
     return {}

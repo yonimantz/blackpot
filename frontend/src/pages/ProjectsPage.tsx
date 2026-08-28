@@ -17,6 +17,7 @@ import {
   exportWorkflowToFile,
   readBlpwFile,
 } from '../utils/workflowFile';
+import Icon from '../icons/Icon';
 
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -165,22 +166,9 @@ export default function ProjectsPage() {
             onClick={handleImportClick}
             disabled={importing}
             title={`Import a ${BLPW_EXTENSION} workflow file`}
+            aria-label="Import workflow"
           >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden
-            >
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="17 8 12 3 7 8" />
-              <line x1="12" y1="3" x2="12" y2="15" />
-            </svg>
+            <Icon name="upload-2-line" size={16} />
             <span>{importing ? 'Importing…' : 'Import'}</span>
           </button>
           <input
@@ -191,7 +179,8 @@ export default function ProjectsPage() {
             onChange={handleImportFile}
           />
           <button className="projects-new-btn" onClick={() => setCreateOpen(true)}>
-            + New Workflow
+            <Icon name="add-line" size={14} />
+            New Workflow
           </button>
         </div>
       </div>
@@ -200,6 +189,9 @@ export default function ProjectsPage() {
         <div className="projects-empty">Loading...</div>
       ) : workflows.length === 0 ? (
         <div className="projects-empty">
+          <div className="projects-empty-icon" aria-hidden>
+            <Icon name="layout-grid-line" size={48} />
+          </div>
           <p>No workflows yet.</p>
           <p>
             Click <strong>+ New Workflow</strong> to get started, or{' '}
@@ -249,46 +241,29 @@ export default function ProjectsPage() {
 
               <div className="workflow-card-actions" onClick={(e) => e.stopPropagation()}>
                 <button
-                  className="workflow-card-btn export"
+                  className="workflow-card-btn export icon-btn"
                   title={`Export as ${BLPW_EXTENSION}`}
+                  aria-label="Export workflow"
                   disabled={exportingId === wf.id}
                   onClick={() => handleExport(wf)}
                 >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    aria-hidden
-                  >
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
-                  </svg>
+                  <Icon name="download-2-line" size={14} />
                 </button>
                 <button
-                  className="workflow-card-btn details"
+                  className="workflow-card-btn details icon-btn"
                   title="Details"
+                  aria-label="Workflow details"
                   onClick={() => setEditTarget(wf)}
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="3" />
-                    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-                  </svg>
+                  <Icon name="information-line" size={14} />
                 </button>
                 <button
-                  className="workflow-card-btn delete"
+                  className="workflow-card-btn delete icon-btn"
                   title="Delete"
+                  aria-label="Delete workflow"
                   onClick={() => setDeleteTarget(wf)}
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="3 6 5 6 21 6" />
-                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                  </svg>
+                  <Icon name="delete-2-line" size={14} />
                 </button>
               </div>
             </div>

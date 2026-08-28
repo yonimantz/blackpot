@@ -14,6 +14,11 @@
   --accent-hover: #818cf8;
   --accent-soft: #4f46e5;
   --accent-muted: rgba(var(--accent-rgb), 0.12);
+  /* Pin accent — pink, used exclusively for "pinned" node state so it reads distinctly from selection/focus */
+  --pin-rgb: 236, 72, 153;
+  --pin-color: #ec4899;
+  --pin-color-hover: #f472b6;
+  --pin-color-muted: rgba(var(--pin-rgb), 0.14);
   /* Workflow tab strip: visible panel + tabs (charcoal, not canvas black) */
   --workflow-tabs-strip-bg: #1a1a1e;
   --workflow-tab-idle-bg: rgba(255, 255, 255, 0.07);
@@ -23,6 +28,52 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
   --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+  /* Spacing / radius scale — adopted incrementally, not a full rewrite */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+}
+
+/* ===== Icon system (MingCute, see src/icons/) ===== */
+.mc-icon {
+  flex: none;
+  display: block;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.icon-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-muted), 0 0 0 1px var(--accent);
 }
 
 * {
@@ -32,7 +83,7 @@
 }
 
 body {
-  font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'Fredoka', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
   background: var(--bg-dark);
   color: var(--text);
   overflow: hidden;
@@ -75,45 +126,6 @@ body {
   overflow: hidden;
 }
 
-/* Focus mode — floating chip over canvas (top right) */
-.focus-mode-canvas-chip {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 20;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(var(--accent-rgb), 0.45);
-  background: rgba(17, 17, 19, 0.92);
-  box-shadow: var(--shadow-md);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  pointer-events: auto;
-  transition: background 0.15s, border-color 0.15s;
-}
-
-.focus-mode-canvas-chip:hover {
-  background: rgba(30, 30, 33, 0.96);
-  border-color: rgba(var(--accent-rgb), 0.65);
-}
-
-.focus-mode-canvas-chip-icon {
-  display: flex;
-  color: var(--accent-hover);
-  flex-shrink: 0;
-}
-
-.focus-mode-canvas-chip-text {
-  color: var(--text);
-  user-select: none;
-}
-
 /* ===== Node Palette (Left Sidebar) ===== */
 .node-palette {
   width: 200px;
@@ -126,7 +138,7 @@ body {
 
 .palette-header {
   padding: 12px 14px;
-  font-weight: 700;
+  font-weight: 600;
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -162,12 +174,19 @@ body {
   flex-shrink: 0;
 }
 
+.category-icon {
+  flex-shrink: 0;
+  opacity: 0.95;
+}
+
 .category-label {
   flex: 1;
 }
 
 .category-arrow {
-  font-size: 10px;
+  display: flex;
+  color: var(--text-dim);
+  opacity: 0.8;
 }
 
 .category-items {
@@ -175,6 +194,8 @@ body {
 }
 
 .palette-item {
+  display: flex;
+  align-items: center;
   padding: 6px 10px;
   margin: 2px 0;
   font-size: 12px;
@@ -209,13 +230,7 @@ body {
   position: relative;
 }
 
-.canvas-container .react-flow__pane {
-  cursor: default;
-}
-
-.canvas-container .react-flow__pane:active {
-  cursor: grabbing;
-}
+/* Canvas pane cursors: styles/cursors.css */
 
 .canvas-container .react-flow__node {
   padding: 0 !important;
@@ -227,6 +242,7 @@ body {
 
 /* ===== Custom Nodes ===== */
 .workflow-node {
+  position: relative;
   background: var(--bg-node);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -294,6 +310,13 @@ body {
   border-style: dashed;
 }
 
+/* Gentle highlight on hover of a group's Play button — previews which nodes will run. */
+.workflow-node.node-run-preview {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.25), 0 0 10px rgba(var(--accent-rgb), 0.12);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
 /* Spinner on executing node header */
 .node-executing-spinner {
   display: inline-block;
@@ -324,11 +347,24 @@ body {
   min-height: 0;
 }
 
+.preview-resizable .node-ports {
+  flex-shrink: 0;
+}
+
 .preview-resizable .node-preview-img {
   width: 100%;
   max-height: none;
   flex: 1;
   object-fit: contain;
+  margin: 6px 0 0;
+  border-radius: 0 0 9px 9px;
+  min-height: 0;
+}
+
+.preview-resizable .node-preview-model {
+  width: 100%;
+  height: auto;
+  flex: 1;
   margin: 6px 0 0;
   border-radius: 0 0 9px 9px;
   min-height: 0;
@@ -341,10 +377,6 @@ body {
   justify-content: center;
   width: 100%;
   margin: 0;
-}
-
-.preview-resizable .node-ports {
-  flex-shrink: 0;
 }
 
 /* ===== Resizable text nodes (prompt, combine, RefMapper, Sketch2Final, studio) ===== */
@@ -439,27 +471,27 @@ body {
   height: 10px;
 }
 
-/* ===== Note Node (sticky-note style, neutral grey) ===== */
+/* ===== Note Node (dark grey panel, black low-opacity fill) ===== */
 .workflow-node.note-node {
-  background: #f3f4f6;
-  border: 1px solid #d1d5db;
-  box-shadow: 2px 4px 12px rgba(0, 0, 0, 0.18);
-  color: #1f2937;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  color: var(--text);
 }
 
 .workflow-node.note-node.selected {
-  border-color: #6b7280;
-  box-shadow: 0 0 0 2px rgba(107, 114, 128, 0.35), 2px 4px 14px rgba(0, 0, 0, 0.22);
+  border-color: #52525b;
+  box-shadow: 0 0 0 2px rgba(113, 113, 122, 0.28), var(--shadow-md);
 }
 
 .workflow-node.note-node .node-header {
-  background: #9ca3af !important;
-  color: #1f2937;
+  background: rgba(0, 0, 0, 0.22) !important;
+  color: var(--text);
   text-shadow: none;
 }
 
 .workflow-node.note-node .node-body {
-  background: #f3f4f6;
+  background: transparent;
 }
 
 .workflow-node.note-node .node-ports {
@@ -473,14 +505,15 @@ body {
 .note-inline-textarea {
   background: transparent !important;
   border: none !important;
-  color: #1f2937 !important;
+  color: var(--text) !important;
   font-size: 12px !important;
   line-height: 1.45 !important;
-  font-family: 'Comic Sans MS', 'Segoe Print', 'Marker Felt', cursive, sans-serif !important;
+  font-family: inherit !important;
 }
 
 .note-inline-textarea::placeholder {
-  color: rgba(31, 41, 55, 0.45) !important;
+  color: var(--text-dim) !important;
+  font-style: italic;
 }
 
 .note-inline-textarea:focus {
@@ -495,6 +528,7 @@ body {
   font-weight: 600;
   display: flex;
   align-items: center;
+  gap: 6px;
   justify-content: space-between;
   color: #fff;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -506,6 +540,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  flex: 1;
 }
 
 .bypass-badge {
@@ -514,6 +549,24 @@ body {
   border-radius: 3px;
   background: rgba(0, 0, 0, 0.35);
   letter-spacing: 0.5px;
+}
+
+/* Informational, not a warning/error state - distinct amber tone so it never
+   reads as something wrong with the node, just "this one costs money". */
+.node-cost-badge {
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  width: 13px;
+  height: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #f59e0b;
+  color: #1a1400;
+  flex: 0 0 auto;
+  cursor: default;
 }
 
 /* ===== Template pin ===== */
@@ -554,15 +607,17 @@ body {
 }
 
 .workflow-node.node-pinned {
-  border-color: var(--accent);
+  border-color: var(--pin-color);
 }
 
 .workflow-node.node-pinned:not(.selected) {
-  box-shadow: 0 0 0 1px var(--accent-muted), var(--shadow-sm);
+  box-shadow: 0 0 0 1px var(--pin-color-muted), var(--shadow-sm);
 }
 
 .node-body {
-  padding: 8px 2px;
+  position: relative;
+  z-index: 1;
+  padding: 0 2px 8px;
   background: var(--bg-node);
   border-radius: 0 0 9px 9px;
 }
@@ -571,6 +626,10 @@ body {
   display: flex;
   justify-content: space-between;
   gap: 8px;
+  position: relative;
+  z-index: 3;
+  padding: 8px 2px 4px;
+  background: var(--bg-node);
 }
 
 .node-inputs,
@@ -605,6 +664,25 @@ body {
   white-space: nowrap;
 }
 
+/* Sit above node border, body content, and selection ring; slightly outside the stroke */
+.canvas-container .react-flow__handle.port-handle {
+  z-index: 10;
+}
+
+.node-port.input-port .react-flow__handle-left.port-handle {
+  transform: translate(calc(-50% - 2px), -50%);
+}
+
+.node-port.output-port .react-flow__handle-right.port-handle {
+  transform: translate(calc(50% + 2px), -50%);
+}
+
+/* When interacting with ports, lift the whole node above neighbors */
+.canvas-container .react-flow__node:has(.port-handle:hover),
+.canvas-container .react-flow__node:has(.port-handle.connectingfrom) {
+  z-index: 10 !important;
+}
+
 .port-handle {
   width: 10px !important;
   height: 10px !important;
@@ -629,6 +707,34 @@ body {
   margin: 6px auto 0;
   display: block;
   object-fit: contain;
+}
+
+.node-preview-model {
+  position: relative;
+  width: calc(100% - 12px);
+  height: 160px;
+  margin: 6px auto 0;
+  display: block;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* The three.js canvas is absolutely positioned so the ResizeObserver measures
+   the box the node gives it, instead of the canvas growing the box itself. */
+.node-preview-model-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.node-preview-model-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--text-dim, #a1a1aa);
+  pointer-events: none;
 }
 
 /* Checkerboard backdrop for transparent editor previews (BG hidden) */
@@ -737,10 +843,9 @@ body {
 }
 
 .dropzone-icon {
-  font-size: 18px;
+  display: flex;
+  justify-content: center;
   color: var(--accent);
-  font-weight: 300;
-  line-height: 1;
 }
 
 .dropzone-text {
@@ -814,7 +919,7 @@ body {
 
 .node-inline-exported-badge {
   font-size: 8px;
-  font-weight: 700;
+  font-weight: 600;
   color: #4ade80;
   text-transform: uppercase;
   letter-spacing: 0.3px;
@@ -842,6 +947,38 @@ body {
 
 .node-inline-number:focus {
   border-color: var(--accent);
+}
+
+.node-math-content {
+  margin: 4px 6px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.math-operation-select {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.math-result-row {
+  padding: 4px 8px;
+  background: var(--bg-input);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.math-result-error {
+  color: var(--danger);
+  font-weight: 500;
 }
 
 .node-inline-color-row {
@@ -1060,6 +1197,10 @@ body {
 }
 
 .inspector-btn-small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   padding: 4px 10px;
   background: var(--accent);
   color: #fff;
@@ -1242,7 +1383,7 @@ body {
 
 .inspector-header {
   padding: 12px 14px;
-  font-weight: 700;
+  font-weight: 600;
   font-size: 13px;
   border-bottom: 2px solid var(--border);
   display: flex;
@@ -1250,11 +1391,9 @@ body {
   gap: 8px;
 }
 
-.inspector-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
+.inspector-header-icon {
   flex-shrink: 0;
+  display: flex;
 }
 
 .inspector-empty {
@@ -1437,6 +1576,73 @@ body {
   letter-spacing: 0.5px;
 }
 
+.gen-meta-block {
+  margin-top: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 6px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.gen-meta-block.lightbox-gen-meta {
+  width: 100%;
+  max-width: min(90vw, 720px);
+  max-height: 30vh;
+  overflow-y: auto;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.gen-meta-prompt-wrap {
+  margin-bottom: 6px;
+}
+
+.gen-meta-prompt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.gen-meta-prompt {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-main);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.gen-meta-copy-btn {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.gen-meta-copy-btn:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.gen-meta-copy-btn.inline {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.gen-meta-seed-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .connection-list {
   margin-bottom: 6px;
 }
@@ -1448,10 +1654,17 @@ body {
 }
 
 .connection-item {
+  display: flex;
+  align-items: center;
+  gap: 3px;
   font-size: 10px;
   color: var(--text);
   padding: 2px 0 2px 12px;
   font-family: 'Consolas', monospace;
+}
+
+.connection-item .mc-icon {
+  color: var(--text-dim);
 }
 
 /* ===== Run Bar ===== */
@@ -1470,7 +1683,7 @@ body {
   border: none;
   border-radius: 8px;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 1px;
   cursor: pointer;
   transition: all 0.2s;
@@ -1498,16 +1711,6 @@ body {
   background: #f87171;
   transform: translateY(-1px);
   box-shadow: 0 4px 20px rgba(239, 68, 68, 0.35);
-}
-
-.run-spinner {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #fff;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
 }
 
 @keyframes spin {
@@ -1599,7 +1802,7 @@ body {
 .context-menu-category {
   padding: 6px 12px 2px;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -1618,11 +1821,9 @@ body {
   background: rgba(255, 255, 255, 0.06);
 }
 
-.context-menu-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+.context-menu-icon {
   flex-shrink: 0;
+  display: flex;
 }
 
 /* ===== Wire Selection ===== */
@@ -1672,28 +1873,21 @@ body {
 }
 
 /* ===== Node Groups ===== */
-.node-groups-layer {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 5;
-}
-
 .node-group-box {
   position: absolute;
+  /* Rendered inside the same viewport pane as nodes via ViewportPortal, so it
+     needs an explicit z-index to keep drawing on top of node content (matching
+     the always-on-top layer it used to be rendered in). */
+  z-index: 1000;
   border: 2px dashed;
   border-radius: 12px;
   pointer-events: none;
   transition: width 0.15s ease, height 0.15s ease, box-shadow 0.15s ease;
 }
 
-.node-group-box-focused {
-  box-shadow:
-    0 0 0 2px rgba(var(--accent-rgb), 0.65),
-    0 0 20px rgba(var(--accent-rgb), 0.2);
+.node-group-empty-hit {
+  position: absolute;
+  pointer-events: auto;
 }
 
 .node-group-header {
@@ -1770,18 +1964,34 @@ body {
   color: var(--danger);
 }
 
-.node-group-btn-focus:hover {
-  color: var(--accent-hover);
+/* More prominent than the other header actions — solid fill instead of the
+   translucent white the ungroup/delete buttons use, and slightly wider so it
+   reads as the primary action in the group header. */
+.node-group-play-btn {
+  width: 30px;
+  background: var(--accent);
+  color: #fff;
 }
 
-.node-group-btn-focus-active {
-  background: rgba(var(--accent-rgb), 0.35);
-  color: var(--accent-hover);
+.node-group-play-btn:hover {
+  background: var(--accent-hover);
+  color: #fff;
 }
 
-.node-group-btn-focus-active:hover {
-  background: rgba(var(--accent-rgb), 0.45);
-  color: var(--text);
+.node-group-play-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-dim);
+}
+
+.node-group-play-btn-active {
+  background: var(--danger);
+}
+
+.node-group-play-btn-active:hover {
+  background: var(--danger);
+  filter: brightness(1.15);
 }
 
 /* ===== Confirm Dialog ===== */
@@ -1878,9 +2088,22 @@ body {
 
 .workflow-meta-title {
   font-size: 17px;
-  font-weight: 700;
-  margin: 0 0 18px;
+  font-weight: 600;
+  margin: 0;
   color: var(--text);
+}
+
+.workflow-meta-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.workflow-meta-header .workflow-meta-title {
+  flex: 1;
+  min-width: 0;
 }
 
 .workflow-meta-label {
@@ -2092,7 +2315,7 @@ body {
 
 .template-edit-section-title {
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-dim);
@@ -2136,6 +2359,9 @@ body {
 }
 
 .template-edit-reorder-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 22px;
   height: 18px;
   padding: 0;
@@ -2143,8 +2369,6 @@ body {
   border-radius: 4px;
   background: var(--bg-panel);
   color: var(--text-dim);
-  font-size: 9px;
-  line-height: 1;
   cursor: pointer;
 }
 
@@ -2194,6 +2418,9 @@ body {
 }
 
 .template-edit-unpin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   width: 26px;
   height: 26px;
@@ -2201,8 +2428,6 @@ body {
   border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
-  font-size: 18px;
-  line-height: 1;
   cursor: pointer;
 }
 
@@ -2365,12 +2590,14 @@ body {
 
 /* Hide the persistent bounding rect that appears AFTER releasing a box
    selection. The individual selected nodes already show their own selected
-   state, so we don't need the surrounding rectangle. The underlying div is
-   kept (transparent) so group-dragging still works. */
+   state. pointer-events:none lets clicks pass through to a node (exclusive
+   select) or the pane/group (deselect all). Drag a selected node to move
+   the whole selection. */
 .react-flow__nodesselection-rect {
   background: transparent !important;
   border: none !important;
   box-shadow: none !important;
+  pointer-events: none !important;
 }
 
 /* ===== Title Bar ===== */
@@ -2515,6 +2742,65 @@ body {
 
 .title-bar-right {
   flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.title-bar-about {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* ===== About modal ===== */
+.about-dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  width: min(360px, calc(100vw - 32px));
+  min-width: 0;
+  padding: 36px 32px 32px;
+}
+
+.about-dialog-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+}
+
+.about-dialog-logo {
+  display: block;
+  height: 36px;
+  width: auto;
+  max-width: 200px;
+  object-fit: contain;
+  margin-bottom: 8px;
+  opacity: 0.95;
+}
+
+.about-dialog-credit {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.about-dialog-titles {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.about-dialog p {
+  margin-bottom: 0;
 }
 
 /* ===== Workflow tabs (open editors) ===== */
@@ -2651,18 +2937,21 @@ body {
 
 .projects-title {
   font-size: 22px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--text);
 }
 
 .projects-new-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 10px 22px;
   background: var(--accent);
   color: #fff;
   border: none;
   border-radius: 8px;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
 }
@@ -2713,6 +3002,14 @@ body {
   color: var(--text-dim);
   font-size: 14px;
   line-height: 1.8;
+}
+
+.projects-empty-icon {
+  display: flex;
+  justify-content: center;
+  color: var(--text-dim);
+  opacity: 0.5;
+  margin-bottom: 12px;
 }
 
 .projects-grid {
@@ -2849,7 +3146,7 @@ body {
 
 .collection-title {
   font-size: 22px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--text);
 }
 
@@ -3119,15 +3416,17 @@ body {
 }
 
 .collection-folder-chip-menu-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   margin-left: 2px;
   padding: 0 6px;
   min-width: 28px;
+  height: 28px;
   border-radius: 8px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-dim);
-  font-size: 16px;
-  line-height: 1;
   cursor: pointer;
   align-self: center;
 }
@@ -3227,7 +3526,7 @@ body {
   margin: 0 0 12px;
   padding: 8px 0 6px;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--text-dim);
   background: linear-gradient(180deg, var(--bg-dark) 70%, transparent);
@@ -3352,6 +3651,43 @@ body {
   display: block;
 }
 
+/* Stand-in tile for a 3D model whose generator returned no render. */
+.collection-thumb-3d {
+  width: 100%;
+  height: 100%;
+  min-height: 100px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.lightbox-image.collection-thumb-3d {
+  width: min(420px, 70vw);
+  height: min(420px, 45vh);
+}
+
+.collection-kind-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 4;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+}
+
 .collection-overlay {
   position: absolute;
   inset: 0;
@@ -3430,14 +3766,11 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.2);
   background: rgba(255, 255, 255, 0.08);
   color: rgba(255, 255, 255, 0.85);
-  font-size: 28px;
-  line-height: 1;
   cursor: pointer;
   transition: all 0.15s;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding-bottom: 4px;
 }
 
 .lightbox-nav:hover {
@@ -3464,22 +3797,31 @@ body {
   }
 }
 
-.lightbox-content {
+.lightbox-content-wrap {
   position: relative;
+  max-width: 90vw;
+  max-height: 90vh;
+  display: flex;
+}
+
+.lightbox-content {
   max-width: 90vw;
   max-height: 90vh;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 16px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .lightbox-image {
   max-width: 100%;
-  max-height: calc(90vh - 80px);
+  max-height: min(60vh, calc(90vh - 220px));
   object-fit: contain;
   border-radius: 8px;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  flex-shrink: 0;
 }
 
 .lightbox-bar {
@@ -3488,6 +3830,8 @@ body {
   justify-content: space-between;
   width: 100%;
   padding: 0 4px;
+  flex-shrink: 0;
+  box-sizing: border-box;
 }
 
 .lightbox-info {
@@ -3572,7 +3916,7 @@ body {
 .nano-prompt-connected-badge {
   display: inline-block;
   font-size: 9px;
-  font-weight: 700;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: #4ade80;
@@ -3588,7 +3932,7 @@ body {
 .nano2-thinking-badge {
   display: inline-block;
   font-size: 9px;
-  font-weight: 700;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: #f59e0b;
@@ -3675,22 +4019,13 @@ body {
 }
 
 /* Visible checkerboard behind Editor canvas when BG is hidden; composite stays transparent for PNG bake */
-.editor-canvas-alpha-wrap {
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  overflow: hidden;
-  background: repeating-conic-gradient(#3f3f46 0% 25%, #27272a 0% 50%) 50% / 16px 16px;
-}
-
-.editor-canvas-alpha-wrap .editor-canvas-preview {
-  border: none;
-  border-radius: 0;
-}
-
 /* ===== Stack Images node ===== */
 
 .stack-dir-pill {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 4px;
@@ -3783,7 +4118,7 @@ body {
 
 .resize-field-label {
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--text-dim);
   letter-spacing: 0.4px;
   width: 12px;
@@ -3850,6 +4185,220 @@ body {
   margin-bottom: 4px;
 }
 
+/* ===== Anchor & offset controls (Resize / Crop) ===== */
+
+.tool-pill-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.tool-pill {
+  appearance: none;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+
+.tool-pill:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: var(--text-main);
+}
+
+.tool-pill.on {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(245, 158, 11, 0.55);
+  color: #fbbf24;
+}
+
+.tool-pill:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.anchor-offset-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.anchor-offset-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.anchor-offset-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.anchor-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px;
+  background: var(--bg-input);
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+
+.anchor-picker-row {
+  display: flex;
+  gap: 3px;
+}
+
+.anchor-cell {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+
+.anchor-picker.compact .anchor-cell {
+  width: 18px;
+  height: 18px;
+  font-size: 10px;
+}
+
+.anchor-cell:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.35);
+  color: var(--text-main);
+}
+
+.anchor-cell.on {
+  background: rgba(245, 158, 11, 0.22);
+  border-color: rgba(245, 158, 11, 0.7);
+  color: #fbbf24;
+}
+
+.anchor-cell:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.offset-control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.offset-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.offset-axis-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  width: 10px;
+  flex-shrink: 0;
+}
+
+.offset-btn {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+  color: var(--text-dim);
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms, color 120ms;
+  flex-shrink: 0;
+}
+
+.offset-btn:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.35);
+  color: var(--text-main);
+}
+
+.offset-btn:disabled,
+.offset-reset:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.offset-input {
+  width: 46px;
+  background: var(--bg-input);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  color: var(--text-main);
+  font-size: 11px;
+  padding: 2px 4px;
+  text-align: center;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.offset-control.compact .offset-input {
+  width: 40px;
+  font-size: 10px;
+}
+
+.offset-input:focus {
+  border-color: rgba(245, 158, 11, 0.55);
+}
+
+.offset-input::-webkit-outer-spin-button,
+.offset-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.offset-input[type='number'] {
+  -moz-appearance: textfield;
+}
+
+.offset-reset {
+  appearance: none;
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  color: var(--text-dim);
+  font-size: 9px;
+  letter-spacing: 0.3px;
+  padding: 1px 6px;
+  cursor: pointer;
+  transition: border-color 120ms, color 120ms;
+}
+
+.offset-reset:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: var(--text-main);
+}
+
 .inspector-btn-small.ghost {
   background: transparent;
   color: var(--text-dim);
@@ -3885,11 +4434,17 @@ body {
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
+  cursor: pointer;
+}
+
+.editor-layer-card.selected {
+  border-color: rgba(99, 102, 241, 0.6);
+  background: rgba(99, 102, 241, 0.08);
 }
 
 .editor-layer-card-header {
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--text);
   margin-bottom: 6px;
   text-transform: uppercase;
@@ -3931,7 +4486,7 @@ body {
 
 .settings-title {
   font-size: 24px;
-  font-weight: 700;
+  font-weight: 600;
   margin-bottom: 24px;
 }
 
@@ -3961,6 +4516,13 @@ body {
 .settings-muted {
   font-size: 13px;
   color: var(--text-dim);
+}
+
+.settings-version {
+  margin-top: 24px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
 }
 
 .settings-muted code {
@@ -4080,19 +4642,91 @@ body {
 
 /* Editor: large fixed shell; canvas area uses square corners (see .editor-modal rules below). */
 .editor-modal {
-  width: min(1440px, calc(100vw - 48px));
-  height: min(940px, calc(100vh - 48px));
-  max-width: min(1440px, calc(100vw - 48px));
-  max-height: min(940px, calc(100vh - 48px));
+  width: min(1760px, calc(100vw - 48px));
+  height: min(1120px, calc(100vh - 48px));
+  max-width: min(1760px, calc(100vw - 48px));
+  max-height: min(1120px, calc(100vh - 48px));
   flex-shrink: 0;
+}
+
+.editor-modal .compositor-modal-sidebar {
+  width: 260px;
 }
 
 .editor-modal .compositor-modal-canvas-wrap {
   border-radius: 0;
+  padding: 10px;
 }
 
 .editor-modal .compositor-modal-canvas.editor-canvas-no-round {
   border-radius: 0;
+  /* The canvas spans the whole pane (not just the BG frame), so a drop shadow
+     around it would no longer trace the image. The frame outline is drawn
+     in-canvas instead. */
+  box-shadow: none;
+}
+
+.editor-canvas-outer {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.editor-canvas-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.editor-canvas-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.editor-canvas-fit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.editor-canvas-fit-btn:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.editor-canvas-fit-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.editor-canvas-zoom {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.editor-canvas-viewport {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
 
 .compositor-modal-header {
@@ -4111,14 +4745,15 @@ body {
 }
 
 .compositor-modal-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 36px;
   height: 36px;
   border: none;
   border-radius: 8px;
   background: var(--bg-input);
   color: var(--text-dim);
-  font-size: 22px;
-  line-height: 1;
   cursor: pointer;
 }
 
@@ -4283,7 +4918,7 @@ body {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  background: var(--bg);
+  background: var(--bg-dark);
 }
 
 .playground-mode-bar {
@@ -4708,7 +5343,7 @@ body {
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
   color: #fff;
   background: rgba(0, 0, 0, 0.65);
   pointer-events: none;

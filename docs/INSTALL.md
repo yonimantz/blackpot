@@ -5,9 +5,9 @@ For whoever receives `SpotOn-Setup.exe`. Nothing here needs a developer setup �
 ## What you need
 
 - Windows 10 or 11, 64-bit
-- About 400 MB of free disk space
-- An internet connection (the image models run in the cloud, not on your machine)
-- An API key for at least one image service — see [API keys](#api-keys) below
+- About 120 MB of free disk space
+- An internet connection (every node that touches an image model runs in the cloud, not on your machine)
+- A fal.ai API key — see [API key](#api-key) below
 
 You do **not** need administrator rights. SpotOn installs into your own user folder.
 
@@ -28,15 +28,11 @@ SpotOn runs entirely on your own machine; that `127.0.0.1` address is not reacha
 
 To quit, close the console window. Launching SpotOn again while it is already running just opens a new browser tab pointing at the copy that is already up.
 
-## API keys
+## API key
 
-SpotOn generates images through Gemini, OpenAI and fal.ai. It ships with no keys, so open the **Settings** page and paste in whichever you have. Keys are stored locally and are sent only to the matching service. For Gemini specifically, [Gemini API keys](GEMINI_API_KEYS.md) explains where the key comes from and how billing is attached to it.
+Everything SpotOn generates runs on [fal.ai](https://fal.ai) — images, background removal, and image-to-prompt. It ships with no key. Ask whoever manages your studio's fal.ai account for your personal key, then open the **Settings** page and paste it in. The key is stored locally and is sent only to fal.ai. [fal.ai API keys](FAL_API_KEYS.md) has the details.
 
-Costs land on your own account with those providers.
-
-## First use of Remove Background
-
-That node runs locally rather than in the cloud, and its model is not part of the installer. The first time you use it, it downloads about 168 MB into `%USERPROFILE%\.u2net`, so the first run takes a while and needs an internet connection. Later runs are offline and fast.
+Costs land on the studio's shared fal.ai account, per image — not a personal one.
 
 ## Where your work is stored
 
@@ -65,6 +61,6 @@ Uninstalling removes the program but **leaves `%APPDATA%\SpotOn` alone**, so you
 
 **Port 8000 is used by something else.** SpotOn tries the next free port automatically and prints the one it settled on. Set the `SPOTON_PORT` environment variable to steer it somewhere specific.
 
-**An image node fails with an authentication or quota error.** That comes from the AI provider, not SpotOn. Check the key on the Settings page and the billing status of the account behind it.
+**An image node fails with an authentication or quota error.** That comes from fal.ai, not SpotOn. Check the key on the Settings page first; if it looks right, ask whoever manages the studio's fal.ai account whether your key was revoked or the shared account is out of credit.
 
 **Anything else.** The console window keeps the error text, so copy what it says when reporting a problem.

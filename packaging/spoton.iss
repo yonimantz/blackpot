@@ -5,8 +5,14 @@
 ;
 ; Build packaging\dist\SpotOn first (see build.bat), then compile this.
 
+; MyAppVersion is normally passed in by build.bat via /DMyAppVersion=..., read
+; from backend\version.py so there is one source of truth. This fallback only
+; matters if someone compiles this script directly with ISCC.
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0-dev"
+#endif
+
 #define MyAppName "SpotOn"
-#define MyAppVersion "1.0.0"
 #define MyAppExeName "SpotOn.exe"
 
 [Setup]
@@ -34,6 +40,10 @@ WizardStyle=modern
 ; Offer to close a running copy rather than failing on locked files.
 CloseApplications=yes
 RestartApplications=no
+; Detects a running copy the reliable way: a named mutex the app holds for
+; its whole process lifetime (see main.py), not just the port-based check
+; the app uses to redirect a second launch to the already-open browser tab.
+AppMutex=SpotOn.SingleInstance
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"

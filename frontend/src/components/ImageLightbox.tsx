@@ -4,6 +4,7 @@ import {
   downloadBlob,
   imageSrcToBlob,
 } from '../utils/imageObjectUrl';
+import Icon from '../icons/Icon';
 
 export interface LightboxImage {
   src: string;
@@ -87,7 +88,7 @@ export default function ImageLightbox({
             navigate(-1);
           }}
         >
-          ‹
+          <Icon name="left-line" size={22} />
         </button>
       )}
       <div className="lightbox-content" onClick={(e) => e.stopPropagation()}>
@@ -106,10 +107,8 @@ export default function ImageLightbox({
             </button>
           </div>
         </div>
-        <button type="button" className="lightbox-close" onClick={onClose} aria-label="Close">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M18 6L6 18M6 6l12 12" />
-          </svg>
+        <button type="button" className="lightbox-close" onClick={onClose} aria-label="Close" title="Close">
+          <Icon name="close-line" size={24} />
         </button>
       </div>
       {count > 1 && (
@@ -122,7 +121,7 @@ export default function ImageLightbox({
             navigate(1);
           }}
         >
-          ›
+          <Icon name="right-line" size={22} />
         </button>
       )}
     </div>

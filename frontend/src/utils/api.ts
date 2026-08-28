@@ -32,7 +32,12 @@ export interface StreamCallbacks {
 }
 
 export async function runWorkflowStreaming(
-  workflow: { nodes: any[]; edges: any[]; workflow_id?: string | null },
+  workflow: {
+    nodes: any[];
+    edges: any[];
+    workflow_id?: string | null;
+    pre_outputs?: Record<string, Record<string, any>>;
+  },
   callbacks: StreamCallbacks,
   signal?: AbortSignal,
 ): Promise<Record<string, any>> {
@@ -176,6 +181,59 @@ export async function exportImages(
   return res.json();
 }
 
+export interface ExportModelItem {
+  assetId: string;
+  fileName: string;
+}
+
+/** Copy a generated GLB from MODELS_DIR to the export folder (Export button). */
+export async function exportModels(
+  items: ExportModelItem[],
+  exportPath = '',
+): Promise<ExportImagesResult> {
+  const res = await authFetch(`${API_BASE}/export-3d`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items, exportPath }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    const detail =
+      err?.detail ??
+      err?.message ??
+      `Backend returned HTTP ${res.status} ${res.statusText}`;
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+  }
+  return res.json();
+}
+
+/** Stable URL that streams a generated GLB by asset id (`{uuid}.glb`). */
+export function getModelFileUrl(assetId: string): string {
+  return `${API_BASE}/model/${assetId}`;
+}
+
+/**
+ * Upload an already-GLB blob (Import 3D node) into MODELS_DIR and return its
+ * asset id. The backend rejects anything that isn't a `.glb` — OBJ/FBX must be
+ * converted client-side first (see `utils/model3dImport.ts`).
+ */
+export async function uploadModel(
+  blob: Blob,
+  fileName = 'model.glb',
+): Promise<{ assetId: string; sizeBytes: number }> {
+  const formData = new FormData();
+  formData.append('file', blob, fileName);
+  const res = await authFetch(`${API_BASE}/model`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.detail || 'Model upload failed');
+  }
+  return res.json();
+}
+
 export async function uploadFile(file: File): Promise<{ fileId: string; dataUrl: string }> {
   const formData = new FormData();
   formData.append('file', file);
@@ -187,10 +245,21 @@ export async function uploadFile(file: File): Promise<{ fileId: string; dataUrl:
   return res.json();
 }
 
-/** Upload raw bytes (File or Blob) to the file store and return its id only. */
-export async function uploadImageBlob(blob: Blob, filename = 'image.png'): Promise<string> {
+/**
+ * Upload raw bytes (File or Blob) to the file store and return its id only.
+ *
+ * Passing `key` stores the bytes under that id instead of a fresh uuid, so
+ * re-uploading overwrites in place. Used for node preview assets, which would
+ * otherwise leave an orphaned file behind on every run.
+ */
+export async function uploadImageBlob(
+  blob: Blob,
+  filename = 'image.png',
+  key?: string,
+): Promise<string> {
   const formData = new FormData();
   formData.append('file', blob, filename);
+  if (key) formData.append('key', key);
   const res = await authFetch(`${API_BASE}/upload`, {
     method: 'POST',
     body: formData,
@@ -200,9 +269,17 @@ export async function uploadImageBlob(blob: Blob, filename = 'image.png'): Promi
   return json.fileId;
 }
 
-/** Stable URL that serves a previously uploaded asset by id. */
-export function getUploadFileUrl(fileId: string): string {
-  return `${API_BASE}/upload/${fileId}`;
+/**
+ * Stable URL that serves a previously uploaded asset by id.
+ *
+ * Assets are served with a one-year cache header, which is right for imported
+ * images (a uuid never changes content) but not for preview assets, which are
+ * overwritten in place. Those pass `rev` so a re-run's image isn't masked by
+ * the previous session's cached copy.
+ */
+export function getUploadFileUrl(fileId: string, rev?: number | null): string {
+  const base = `${API_BASE}/upload/${fileId}`;
+  return rev ? `${base}?v=${rev}` : base;
 }
 
 // ---------------------------------------------------------------------------
@@ -289,14 +366,22 @@ export async function renameWorkflow(id: string, name: string): Promise<void> {
 // Collection
 // ---------------------------------------------------------------------------
 
+export type CollectionItemKind = 'image' | 'model3d';
+
 export interface CollectionItem {
   id: string;
   workflow_id: string | null;
   filename: string;
+  /** 'model3d' items are GLB files whose picture comes from a stored thumbnail. */
+  kind?: CollectionItemKind;
+  has_thumb?: boolean;
   width: number | null;
   height: number | null;
   created_at: string;
   folder_id?: string | null;
+  prompt?: string | null;
+  seed?: number | null;
+  model?: string | null;
 }
 
 export interface CollectionFolder {
@@ -371,82 +456,29 @@ export async function deleteCollectionItem(id: string): Promise<void> {
   if (!res.ok) throw new Error('Failed to delete image');
 }
 
+/** The item's own file: the image, or the GLB for a 3D model. */
 export async function fetchCollectionImageBlob(id: string): Promise<Blob> {
   const res = await authFetch(`${API_BASE}/collection/${id}/file`);
   if (!res.ok) throw new Error('Failed to load image');
   return res.blob();
 }
 
-// ---------------------------------------------------------------------------
-// User settings (Gemini API key)
-// ---------------------------------------------------------------------------
-
-export async function getGeminiKeyStatus(): Promise<{
-  hasKey: boolean;
-  managedByEnv: boolean;
-}> {
-  const res = await authFetch(`${API_BASE}/user/gemini-key`);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail || 'Failed to load key status');
-  }
-  return res.json();
-}
-
-export async function setUserGeminiKey(apiKey: string): Promise<void> {
-  const res = await authFetch(`${API_BASE}/user/gemini-key`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail || 'Failed to save API key');
-  }
-}
-
-export async function clearUserGeminiKey(): Promise<void> {
-  const res = await authFetch(`${API_BASE}/user/gemini-key`, { method: 'DELETE' });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail || 'Failed to clear API key');
-  }
+/** The item's picture: the image itself, or a 3D model's stored render. */
+export async function fetchCollectionThumbBlob(id: string): Promise<Blob> {
+  const res = await authFetch(`${API_BASE}/collection/${id}/thumb`);
+  if (!res.ok) throw new Error('Failed to load thumbnail');
+  return res.blob();
 }
 
 // ---------------------------------------------------------------------------
-// User settings (OpenAI API key)
+// App info
 // ---------------------------------------------------------------------------
 
-export async function getOpenAIKeyStatus(): Promise<{
-  hasKey: boolean;
-  managedByEnv: boolean;
-}> {
-  const res = await authFetch(`${API_BASE}/user/openai-key`);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail || 'Failed to load key status');
-  }
-  return res.json();
-}
-
-export async function setUserOpenAIKey(apiKey: string): Promise<void> {
-  const res = await authFetch(`${API_BASE}/user/openai-key`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail || 'Failed to save API key');
-  }
-}
-
-export async function clearUserOpenAIKey(): Promise<void> {
-  const res = await authFetch(`${API_BASE}/user/openai-key`, { method: 'DELETE' });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail || 'Failed to clear API key');
-  }
+export async function getAppVersion(): Promise<string | null> {
+  const res = await authFetch(`${API_BASE}/health`);
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => ({}));
+  return typeof body?.version === 'string' ? body.version : null;
 }
 
 // ---------------------------------------------------------------------------

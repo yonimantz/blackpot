@@ -1,0 +1,168 @@
+/* MingCute cursor system.
+ *
+ * `cursors.generated.css` (see scripts/fetch-icons.mjs) defines --cursor-*
+ * custom properties, each already a full "url(...) hotspotX hotspotY" value.
+ * Every rule below appends its own native fallback so Chromium's mandatory
+ * comma-fallback rule is satisfied, and this file is imported after App.css
+ * so it wins ties on equal-specificity selectors already defined there.
+ *
+ * Default pointer: mingcute:cursor-2-fill → --cursor-2-fill (not cursor-fill)
+ *
+ * Left native on purpose: text inputs/textareas/contenteditable (`text`),
+ * React Flow resize edges (`ns-resize`/`ew-resize`/`nwse-resize`), and the
+ * crosshair-picking canvases in CropModal / CompositorModal / KeyColorModal /
+ * EditorCanvasPreview, where pixel precision matters more than styling.
+ */
+@import './cursors.generated.css';
+
+/* ===== Default app-wide: mingcute cursor-2-fill ===== */
+html,
+body,
+.app-shell {
+  cursor: var(--cursor-2-fill), default;
+}
+
+/* ===== Clickables ===== */
+button:not(:disabled),
+[role='button'],
+.icon-btn,
+a[href],
+.category-header,
+.context-menu-item,
+.workflow-card,
+.collection-item {
+  cursor: var(--cursor-pointer), pointer;
+}
+
+/* ===== Disabled everywhere (wins over more specific `:disabled` rules already
+   set in App.css, matching the tone of this file's existing !important usage) ===== */
+:disabled,
+.node-palette.palette-locked .palette-item {
+  cursor: var(--cursor-forbid), not-allowed !important;
+}
+
+/* ===== Canvas: cursor-2-fill on empty canvas (incl. box-select); hand on node hover; grab while dragging ===== */
+.canvas-container,
+.canvas-container .react-flow,
+.canvas-container .react-flow__viewport,
+.canvas-container .react-flow__pane,
+.canvas-container .react-flow__pane.selection,
+.canvas-container .react-flow__pane.draggable:not(.dragging) {
+  cursor: var(--cursor-2-fill), default;
+}
+
+.canvas-container .react-flow__node {
+  cursor: var(--cursor-2-fill), default;
+}
+
+.canvas-container .react-flow__node:hover {
+  cursor: var(--cursor-hand-fill), grab;
+}
+
+/* Box-select: keep cursor-2-fill on canvas and nodes (not the open-hand hover) */
+.canvas-container:has(.react-flow__pane.selection) .react-flow__node,
+.canvas-container:has(.react-flow__pane.selection) .react-flow__node:hover {
+  cursor: var(--cursor-2-fill), default;
+}
+
+/* Panning canvas or dragging node(s): mingcute hand-grab-fill */
+.canvas-container:has(.react-flow__pane.dragging),
+.canvas-container:has(.react-flow__pane.dragging) .react-flow__viewport,
+.canvas-container:has(.react-flow__pane.dragging) .react-flow__pane,
+.canvas-container:has(.react-flow__pane.dragging) .react-flow__node,
+.canvas-container:has(.react-flow__pane.dragging) .react-flow__node:hover,
+.canvas-container .react-flow__node.dragging,
+.canvas-container .react-flow__node.dragging:hover,
+body.is-panning,
+body.is-panning .canvas-container,
+body.is-panning .canvas-container .react-flow__viewport,
+body.is-panning .canvas-container .react-flow__pane,
+body.is-panning .canvas-container .react-flow__node,
+body.is-panning .canvas-container .react-flow__node:hover,
+body.is-dragging-node,
+body.is-dragging-node .canvas-container,
+body.is-dragging-node .canvas-container .react-flow__viewport,
+body.is-dragging-node .canvas-container .react-flow__pane,
+body.is-dragging-node .canvas-container .react-flow__node,
+body.is-dragging-node .canvas-container .react-flow__node:hover {
+  cursor: var(--cursor-grabbing), grabbing !important;
+}
+
+/* ===== Palette drag source / node-group drag handle ===== */
+.palette-item {
+  cursor: var(--cursor-grab), grab;
+}
+
+.palette-item:active {
+  cursor: var(--cursor-grabbing), grabbing;
+}
+
+.node-group-header {
+  cursor: var(--cursor-grab), grab;
+}
+
+.node-group-header:active {
+  cursor: var(--cursor-grabbing), grabbing;
+}
+
+/* ===== Cut mode ===== */
+.canvas-container.cut-ready,
+.canvas-container.cutting {
+  cursor: var(--cursor-scissors), crosshair;
+}
+
+/* ===== Left Nodes palette & canvas zoom controls ===== */
+.node-palette,
+.node-palette .palette-header,
+.node-palette .category-header,
+.node-palette .palette-item,
+.node-palette .category-label,
+.node-palette .category-arrow,
+.canvas-container .react-flow__controls,
+.canvas-container .react-flow__controls-button {
+  cursor: var(--cursor-2-fill), default !important;
+}
+
+/* ===== Connection handles & edges ===== */
+.port-handle {
+  cursor: var(--cursor-2-fill), default;
+}
+
+.react-flow__edge {
+  cursor: var(--cursor-2-fill), default;
+}
+
+.react-flow__edge:hover {
+  cursor: var(--cursor-link), pointer;
+}
+
+body.is-connecting .react-flow__pane {
+  cursor: var(--cursor-aim-active), crosshair;
+}
+
+body.is-connecting .port-handle {
+  cursor: var(--cursor-aim-active), crosshair;
+}
+
+/* Space held: open hand on canvas (pan mode); active drag uses hand-grab-fill below */
+body.is-space-pan:not(.is-panning) .canvas-container,
+body.is-space-pan:not(.is-panning) .canvas-container .react-flow,
+body.is-space-pan:not(.is-panning) .canvas-container .react-flow__viewport,
+body.is-space-pan:not(.is-panning) .canvas-container .react-flow__pane,
+body.is-space-pan:not(.is-panning) .canvas-container .react-flow__node,
+body.is-space-pan:not(.is-panning) .canvas-container .react-flow__node:hover {
+  cursor: var(--cursor-hand-fill), grab !important;
+}
+
+.port-handle:hover,
+.node-port.output-port .port-handle:hover,
+.node-port.input-port .port-handle:hover,
+body.is-space-pan .port-handle:hover {
+  cursor: var(--cursor-3-fill), crosshair !important;
+}
+
+/* ===== Zoom targets ===== */
+.playground-output-thumb,
+.playground-result-image-btn {
+  cursor: var(--cursor-zoom-in), zoom-in;
+}

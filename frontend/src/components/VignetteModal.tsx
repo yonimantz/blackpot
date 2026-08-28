@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
 import { MAX_VIGNETTE_LAYERS } from '../types/nodeTypes';
+import { getConnectedImageDataUrl } from '../utils/upstreamImage';
+import { bakeCanvasPreview, drawVignette } from '../utils/toolPreviewBake';
 import VignetteCanvasPreview from './VignetteCanvasPreview';
+import Icon from '../icons/Icon';
 import {
   defaultVignetteLayer,
   newVignetteLayerId,
@@ -44,6 +47,7 @@ export default function VignetteModal({
   nodeId: string;
 }) {
   const nodes = useWorkflowStore((s) => s.nodes);
+  const edges = useWorkflowStore((s) => s.edges);
   const updateNodeData = useWorkflowStore((s) => s.updateNodeData);
   const isRunning = useWorkflowStore((s) => s.isRunning);
 
@@ -52,6 +56,7 @@ export default function VignetteModal({
 
   const layers = useMemo(() => asLayers(data), [data.vignetteLayers]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [applying, setApplying] = useState(false);
 
   const effectiveSelected =
     selectedId && layers.some((l) => l.id === selectedId) ? selectedId : layers[0]?.id ?? null;
@@ -153,6 +158,32 @@ export default function VignetteModal({
     if (effectiveSelected === id) setSelectedId(next[0]?.id ?? null);
   };
 
+  const imageSrc = getConnectedImageDataUrl(nodeId, 'image', edges, nodes);
+
+  // Bakes the vignette at the source's natural size into `_vignettePreview`,
+  // which is what makes a connected Preview node (or the node's own
+  // thumbnail) show the result without a workflow run.
+  const handleApply = async () => {
+    if (applying) return;
+    flushPendingColor();
+    setApplying(true);
+    try {
+      const url = await bakeCanvasPreview({ image: imageSrc }, (ctx, canvas, images) =>
+        drawVignette(ctx, canvas, images, layers),
+      );
+      if (!url) {
+        alert(
+          'Could not bake the vignette preview. Connect an image to the Image input first, then try again.',
+        );
+        return;
+      }
+      updateNodeData(nodeId, { _vignettePreview: url });
+      onClose();
+    } finally {
+      setApplying(false);
+    }
+  };
+
   return (
     <div
       className="compositor-modal-overlay"
@@ -164,8 +195,8 @@ export default function VignetteModal({
       <div className="compositor-modal" role="dialog" aria-labelledby="vignette-modal-title">
         <div className="compositor-modal-header">
           <h2 id="vignette-modal-title">Vignette</h2>
-          <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close">
-            ×
+          <button type="button" className="compositor-modal-close" onClick={onClose} aria-label="Close" title="Close">
+            <Icon name="close-line" size={18} />
           </button>
         </div>
         <div className="compositor-modal-body">
@@ -302,6 +333,19 @@ export default function VignetteModal({
                 />
               </div>
             )}
+
+            <div className="editor-field-row" style={{ gap: 8, marginTop: 18 }}>
+              <button
+                type="button"
+                className="inspector-btn"
+                style={{ flex: 1, background: '#4f46e5', color: '#fff', borderColor: '#4f46e5' }}
+                onClick={handleApply}
+                disabled={isRunning || applying || !imageSrc}
+                title={!imageSrc ? 'Connect an image to the Image input first' : undefined}
+              >
+                {applying ? 'Applying…' : 'Apply'}
+              </button>
+            </div>
           </aside>
           <div className="compositor-modal-canvas-wrap vignette-modal-canvas-wrap">
             <VignetteCanvasPreview
