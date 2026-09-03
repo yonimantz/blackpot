@@ -347,7 +347,9 @@ export default function RemoveBgModal({
       }
 
       const rawMaskData = await loadImageData((payload as RemoveBgResponse).rawMask);
-      let mask = new Uint8ClampedArray(rawMaskData.width * rawMaskData.height);
+      let mask: Uint8ClampedArray<ArrayBufferLike> = new Uint8ClampedArray(
+        rawMaskData.width * rawMaskData.height,
+      );
       for (let i = 0; i < mask.length; i += 1) mask[i] = rawMaskData.data[i * 4];
       if (rawMaskData.width !== srcPixels.width || rawMaskData.height !== srcPixels.height) {
         mask = resizeMask(

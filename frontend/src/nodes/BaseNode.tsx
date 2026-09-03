@@ -1,6 +1,6 @@
 import { Handle, Position, NodeResizer, NodeResizeControl, ResizeControlVariant } from '@xyflow/react';
 import type { NodeProps } from '@xyflow/react';
-import { memo, lazy, Suspense, useMemo, useCallback, useRef, useEffect } from 'react';
+import { memo, lazy, Suspense, useMemo, useCallback, useRef, useEffect, useState } from 'react';
 import {
   NODE_TYPE_DEFINITIONS,
   NODE_CATEGORIES,
@@ -76,7 +76,13 @@ import {
 } from '../utils/toolPreviewBake';
 import { registerModel3dCapture, unregisterModel3dCapture } from '../utils/model3dCapture';
 import type { Model3dViewerHandle, Model3dViewerSettings } from '../components/Model3dViewer';
-import { useImageObjectUrl } from '../utils/imageObjectUrl';
+import {
+  blobToPngBlob,
+  copyImageToClipboard,
+  downloadBlob,
+  imageSrcToBlob,
+  useImageObjectUrl,
+} from '../utils/imageObjectUrl';
 import { buildImportImageData } from '../utils/importImageData';
 import { isIdentity as isAdjustmentsIdentity, normalizeAdjustments } from '../utils/adjustmentsMath';
 
@@ -1363,6 +1369,18 @@ function KeyColorNodeContent({ data }: { data: Record<string, any> }) {
   );
 }
 
+function previewPngFilename(label: unknown): string {
+  const raw = typeof label === 'string' ? label.trim() : '';
+  const stem = raw.replace(/[<>:"/\\|?*]+/g, '').trim() || 'preview';
+  return `${stem}.png`;
+}
+
+async function previewSrcToPngBlob(src: string, filename: string): Promise<Blob> {
+  const blob = await imageSrcToBlob(src, filename);
+  if (blob.type === 'image/png') return blob;
+  return blobToPngBlob(blob);
+}
+
 /**
  * Preview node body. Prefers the live upstream image (so the Preview
  * updates instantly when an upstream tool node — Resize, Stack, etc. —
@@ -1378,10 +1396,71 @@ function PreviewNodeContent({ nodeId, data }: { nodeId: string; data: Record<str
   );
   const src = liveSrc || (data.previewData as string) || '';
   const url = useImageObjectUrl(src);
-  return url ? (
-    <img src={url} alt="Preview" className="node-preview-img" />
-  ) : (
-    <div className="node-preview-placeholder">No preview</div>
+  const filename = previewPngFilename(data.label);
+  const [busy, setBusy] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    if (!src || busy) return;
+    setBusy(true);
+    try {
+      const png = await previewSrcToPngBlob(src, filename);
+      await copyImageToClipboard(png, filename);
+    } catch {
+      alert('Failed to copy image to clipboard');
+    } finally {
+      setBusy(false);
+    }
+  }, [src, busy, filename]);
+
+  const handleDownload = useCallback(async () => {
+    if (!src || busy) return;
+    setBusy(true);
+    try {
+      const png = await previewSrcToPngBlob(src, filename);
+      downloadBlob(png, filename);
+    } catch {
+      alert('Failed to download image');
+    } finally {
+      setBusy(false);
+    }
+  }, [src, busy, filename]);
+
+  if (!url) {
+    return <div className="node-preview-placeholder">No preview</div>;
+  }
+
+  return (
+    <div className="node-preview-wrap">
+      <img src={url} alt="Preview" className="node-preview-img" />
+      <div className="node-preview-actions">
+        <button
+          type="button"
+          className="node-preview-action-btn nopan nodrag"
+          title="Copy PNG to clipboard"
+          disabled={busy}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            void handleCopy();
+          }}
+        >
+          <Icon name="copy-2-line" size={14} />
+        </button>
+        <button
+          type="button"
+          className="node-preview-action-btn nopan nodrag"
+          title="Download PNG"
+          disabled={busy}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            void handleDownload();
+          }}
+        >
+          <Icon name="download-2-line" size={14} />
+        </button>
+      </div>
+    </div>
   );
 }
 
